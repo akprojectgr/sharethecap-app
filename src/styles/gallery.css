@@ -1,0 +1,31 @@
+/* Masonry Grid Responsive Columns */
+.masonry-grid {
+  column-count: 2;
+  column-gap: 15px;
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (min-width: 600px) {
+  .masonry-grid {
+    column-count: 2;
+  }
+}
+
+@media (min-width: 900px) {
+  .masonry-grid {
+    column-count: 3;
+  }
+}
+
+@media (min-width: 1200px) {
+  .masonry-grid {
+    column-count: 4;
+  }
+}
+
+.photo-card {
+  break-inside: avoid;
+  margin-bottom: 15px;
+}

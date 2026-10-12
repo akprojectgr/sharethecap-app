@@ -1,0 +1,16 @@
+{
+  // ΔΙΟΡΘΩΣΗ (code review): το name εδώ ήταν "klev-app" ενώ το πραγματικό
+  // Cloudflare Pages project (και το --project-name στο package.json
+  // "deploy" script) είναι "klevapp" - αν κάποιος τρέξει ποτέ χειροκίνητα
+  // `wrangler pages deploy dist` ΧΩΡΙΣ το --project-name flag (πολύ πιθανό
+  // σενάριο σε last-minute πανικό), το wrangler θα έπαιρνε αυτό το "name"
+  // και θα έκανε deploy σε ΛΑΘΟΣ/καινούργιο project - η πραγματική σελίδα
+  // θα συνέχιζε να δείχνει το παλιό build, χωρίς κανένα error.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klevapp",
+  "compatibility_date": "2026-09-25",
+  "assets": {
+    "directory": "dist",
+    "not_found_handling": "single-page-application"
+  }
+}

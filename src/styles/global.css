@@ -1,0 +1,19 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&display=swap');
+@import url('./gallery.css');
+/* ΔΙΟΡΘΩΣΗ (code review - "case-sensitivity", βρέθηκε με πραγματικό build):
+   το πραγματικό αρχείο είναι 'TopBar.css' (κεφαλαία T και B). */
+@import url('./TopBar.css');
+
+* {
+  font-family: 'Manrope', sans-serif !important;
+}
+
+body {
+  font-family: 'Manrope', sans-serif !important;
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  font-family: 'Manrope', sans-serif !important;
+}
