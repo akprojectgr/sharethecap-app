@@ -12,18 +12,30 @@ import { getDeviceToken } from './Devicetoken';
 // πλέον insert/delete στον πίνακα "likes" και για anon (μέσω device_token).
 
 // Πλήθος likes ανά φωτογραφία, για μια λίστα από photo ids.
+// Τα ids στέλνονται μέσα στο URL (?photo_id=in.(...)) - με εκατοντάδες
+// φωτογραφίες φορτωμένες το URL ξεπερνάει τα όρια (~8-16KB) και το request
+// αποτυγχάνει σιωπηλά (όλα τα likes "εξαφανίζονται"). Τα σπάμε σε κομμάτια.
+const LIKE_ID_CHUNK = 80;
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 export async function fetchLikeCounts(photoIds) {
   if (!photoIds.length) return {};
-  const { data, error } = await supabase
-    .from('likes')
-    .select('photo_id')
-    .in('photo_id', photoIds);
-
-  if (error || !data) return {};
+  const results = await Promise.all(
+    chunk(photoIds, LIKE_ID_CHUNK).map((ids) =>
+      supabase.from('likes').select('photo_id').in('photo_id', ids)
+    )
+  );
 
   const counts = {};
-  for (const row of data) {
-    counts[row.photo_id] = (counts[row.photo_id] || 0) + 1;
+  for (const { data, error } of results) {
+    if (error || !data) continue;
+    for (const row of data) {
+      counts[row.photo_id] = (counts[row.photo_id] || 0) + 1;
+    }
   }
   return counts;
 }
@@ -33,13 +45,20 @@ export async function fetchLikeCounts(photoIds) {
 export async function fetchMyLikedPhotoIds(photoIds, userId) {
   if (!photoIds.length) return new Set();
 
-  const query = supabase.from('likes').select('photo_id').in('photo_id', photoIds);
-  const { data, error } = userId
-    ? await query.eq('user_id', userId)
-    : await query.eq('device_token', getDeviceToken());
+  const deviceToken = userId ? null : getDeviceToken();
+  const results = await Promise.all(
+    chunk(photoIds, LIKE_ID_CHUNK).map((ids) => {
+      const query = supabase.from('likes').select('photo_id').in('photo_id', ids);
+      return userId ? query.eq('user_id', userId) : query.eq('device_token', deviceToken);
+    })
+  );
 
-  if (error || !data) return new Set();
-  return new Set(data.map((r) => r.photo_id));
+  const mine = new Set();
+  for (const { data, error } of results) {
+    if (error || !data) continue;
+    for (const r of data) mine.add(r.photo_id);
+  }
+  return mine;
 }
 
 // ΔΙΟΡΘΩΣΗ (code review - "διπλό-tap στην καρδιά"): δύο ταχιά taps στο ίδιο

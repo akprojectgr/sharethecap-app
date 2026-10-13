@@ -55,6 +55,7 @@ const translations = {
     'guestSignIn.namePlaceholder': 'e.g. John Smith',
     'guestSignIn.profanityWarning': 'Please use your real name, without inappropriate words 🙂',
     'guestSignIn.nameTakenWarning': 'There is already a guest with this name — add something to stand out (e.g. last name)',
+    'guestSignIn.itsMe': "It's me (I joined from another phone/browser)",
     'guestSignIn.footnote': "The couple will know who took each moment",
     'guestSignIn.continue': 'Join Party',
 
@@ -204,6 +205,7 @@ const translations = {
     'guestSignIn.namePlaceholder': 'π.χ. Γιάννης Παπαδόπουλος',
     'guestSignIn.profanityWarning': 'Χρησιμοποίησε το πραγματικό σου όνομα, χωρίς ακατάλληλες λέξεις 🙂',
     'guestSignIn.nameTakenWarning': 'Υπάρχει ήδη καλεσμένος/η με αυτό το όνομα — πρόσθεσε κάτι για να ξεχωρίζεις (π.χ. επώνυμο)',
+    'guestSignIn.itsMe': 'Είμαι εγώ (μπήκα από άλλο κινητό/browser)',
     'guestSignIn.footnote': 'Το ζευγάρι θα ξέρει ποιος τράβηξε κάθε στιγμή',
     'guestSignIn.continue': 'Join Party',
 

@@ -163,7 +163,14 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
   // αργό venue wifi) δεν μπλόκαρε το κουμπί - ο guest μπορούσε να πατήσει
   // Join Party ΜΕΣΑ στο παράθυρο των ~450ms+network πριν φανεί "το όνομα
   // υπάρχει ήδη" και να μπει στο event με όνομα που θα απορριφθεί μετά.
-  const canContinue = !!guestName.trim() && !nameTaken && !hasProfanity && !checkingName;
+  // Ο ίδιος άνθρωπος μπορεί να ξαναμπεί από ΑΛΛΗ συσκευή/browser (π.χ.
+  // άνοιξε το link από WhatsApp αντί για την κάμερα) - τότε το όνομά του
+  // φαίνεται "πιασμένο". Του δίνουμε ρητή επιλογή "Είμαι εγώ" αντί να
+  // κολλήσει έξω από το event.
+  const [confirmedSameName, setConfirmedSameName] = useState(false);
+  useEffect(() => { setConfirmedSameName(false); }, [guestName]);
+
+  const canContinue = !!guestName.trim() && (!nameTaken || confirmedSameName) && !hasProfanity && !checkingName;
 
   // Ίδιο pattern με το FloatingAddMenu (uploading -> opacity 0.6 στο ίδιο
   // κουμπί) αντί για ξεχωριστό γκρι/λευκό "disabled" χρώμα - το κουμπί
@@ -274,10 +281,19 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
           <p style={styles.nameWarning}>
             {t('guestSignIn.profanityWarning')}
           </p>
-        ) : nameTaken ? (
-          <p style={styles.nameWarning}>
-            {t('guestSignIn.nameTakenWarning')}
-          </p>
+        ) : nameTaken && !confirmedSameName ? (
+          <>
+            <p style={styles.nameWarning}>
+              {t('guestSignIn.nameTakenWarning')}
+            </p>
+            <button
+              type="button"
+              onClick={() => setConfirmedSameName(true)}
+              style={{ background: 'none', border: 'none', color: 'inherit', textDecoration: 'underline', opacity: 0.85, fontSize: '13px', cursor: 'pointer', padding: '6px 0', fontFamily: 'inherit' }}
+            >
+              {t('guestSignIn.itsMe')}
+            </button>
+          </>
         ) : (
           <p style={styles.nameFootnote}>{t('guestSignIn.footnote')}</p>
         )}

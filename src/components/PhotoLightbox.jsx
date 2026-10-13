@@ -353,13 +353,29 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
       );
     }
 
+    // Οι γειτονικές (peek) φωτογραφίες δείχνουν το ελαφρύ preview (~1200px)
+    // αντί για το πλήρες original (συχνά 3-10MB) - αλλιώς κάθε swipe
+    // κατεβάζει 3 ολόκληρα originals, πολύ αργό σε φορτωμένο venue wifi.
+    // Η τρέχουσα φωτο μένει σε πλήρη ποιότητα (zoom/λήψη).
+    if (!isCurrent) {
+      return <img src={thumbUrl} alt="" style={styles.image} draggable={false} />;
+    }
+    // Τρέχουσα φωτο: το preview (ήδη cached από το peek) από κάτω, το πλήρες
+    // original από πάνω - φαίνεται αμέσως κάτι σωστό και "οξύνει" μόλις
+    // φορτώσει το original. key={media.id} ώστε να μη μείνει στιγμιαία
+    // ορατή η ΠΡΟΗΓΟΥΜΕΝΗ φωτο όσο φορτώνει η νέα.
     return (
-      <img
-        src={getPhotoUrl(media.file_path)}
-        alt={isCurrent ? 'Event moment' : ''}
-        style={styles.image}
-        draggable={false}
-      />
+      <div key={media.id} style={{ position: 'relative', width: '100%', height: '100%' }}>
+        {media.preview_path && (
+          <img src={thumbUrl} alt="" style={styles.image} draggable={false} />
+        )}
+        <img
+          src={getPhotoUrl(media.file_path)}
+          alt="Event moment"
+          style={media.preview_path ? { ...styles.image, position: 'absolute', top: 0, left: 0 } : styles.image}
+          draggable={false}
+        />
+      </div>
     );
   };
 

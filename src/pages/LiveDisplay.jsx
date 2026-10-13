@@ -120,7 +120,31 @@ export default function LiveDisplay() {
       )
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
+    // Η οθόνη του venue τρέχει ασυνόδευτη ΟΛΟ το βράδυ - αν πέσει στιγμιαία
+    // το WiFi, το realtime ξανασυνδέεται αλλά ΧΑΝΕΙ τις φωτογραφίες που
+    // ανέβηκαν όσο ήταν εκτός. Κάθε 60" φέρνουμε ήσυχα όσες λείπουν (και
+    // αφαιρούμε όσες σβήστηκαν), χωρίς να αλλάξει η τρέχουσα διαφάνεια.
+    const refreshTimer = setInterval(async () => {
+      const { data, error } = await supabase
+        .from('photos')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('created_at', { ascending: false });
+      if (error || !data) return;
+      setPhotos((prev) => {
+        const fresh = new Set(data.map((p) => p.id));
+        const known = new Set(prev.map((p) => p.id));
+        const added = data.filter((p) => !known.has(p.id));
+        const kept = prev.filter((p) => fresh.has(p.id));
+        if (added.length === 0 && kept.length === prev.length) return prev;
+        return [...added, ...kept];
+      });
+    }, 60 * 1000);
+
+    return () => {
+      clearInterval(refreshTimer);
+      supabase.removeChannel(channel);
+    };
   }, [event]);
 
   // Auto-advance slideshow

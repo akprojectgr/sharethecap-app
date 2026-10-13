@@ -176,6 +176,18 @@ function isRetryableNetworkError(err) {
   );
 }
 
+function sanitizeFileName(name, fallback) {
+  const raw = String(name || '').trim();
+  const dot = raw.lastIndexOf('.');
+  const base = dot > 0 ? raw.slice(0, dot) : raw;
+  const ext = dot > 0 ? raw.slice(dot + 1) : '';
+  const clean = (s) => s.normalize('NFD').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const cleanBase = clean(base).slice(0, 60);
+  const cleanExt = clean(ext).toLowerCase().slice(0, 8);
+  if (!cleanExt) return cleanBase ? `${cleanBase}.${fallback.split('.').pop()}` : fallback;
+  return `${cleanBase || fallback.split('.')[0]}.${cleanExt}`;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -751,7 +763,10 @@ export function useEventPhotos(currentEvent, guestData, user) {
         currentFileForLog = file;
         setUploadProgress({ current: i + 1, total: pendingFiles.length });
         const isVideo = isVideoFile(file);
-        const safeName = file.name || (isVideo ? 'video.mp4' : 'photo.jpg');
+        // Το Supabase Storage απορρίπτει κλειδιά με ελληνικούς/ειδικούς
+        // χαρακτήρες ("Invalid key") - π.χ. "Στιγμιότυπο οθόνης.png" ή "#1.jpg".
+        // Κρατάμε μόνο λατινικά/αριθμούς/._- στο όνομα του αρχείου.
+        const safeName = sanitizeFileName(file.name, isVideo ? 'video.mp4' : 'photo.jpg');
         const fileName = `${currentEvent.id}/${Date.now()}_${safeName}`;
 
         // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
@@ -769,7 +784,8 @@ export function useEventPhotos(currentEvent, guestData, user) {
                 .upload(fileName, file, {
                   cacheControl: '3600',
                   upsert: false,
-                  contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg')
+                  // Χωρίς ";codecs=..." - το bucket δέχεται μόνο καθαρά image/* / video/*.
+                  contentType: (file.type || (isVideo ? 'video/mp4' : 'image/jpeg')).split(';')[0].trim()
                 }),
               isVideo ? UPLOAD_TIMEOUT_MS_VIDEO : UPLOAD_TIMEOUT_MS_PHOTO,
               'main_upload'
