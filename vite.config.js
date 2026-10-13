@@ -22,7 +22,16 @@ export default defineConfig({
         // Ποτέ μην κάνεις cache requests προς το Supabase - θέλουμε πάντα
         // φρέσκα δεδομένα (νέες φωτογραφίες, likes, guests), όχι παλιά
         // cached απαντήσεις.
-        navigateFallbackDenylist: [/^\/rest\//, /^\/auth\//, /^\/storage\//, /^\/realtime\//]
+        // ΔΙΟΡΘΩΣΗ ("/r/<code> redirect δεν δούλευε ποτέ, σκάει στο React
+        // Router"): το service worker (navigateFallback) απαντούσε ΑΜΕΣΩΣ με
+        // το cached index.html σε ΚΑΘΕ navigation - ακόμα και σε
+        // /r/<code>, χωρίς να φτάσει καν το request στο δίκτυο/server. Έτσι
+        // το Cloudflare Pages Function στο functions/r/[code].js δεν
+        // προλάβαινε ΠΟΤΕ να τρέξει· ο browser "απαντούσε μόνος του" με το
+        // παλιό SPA πριν καν σταλεί το αίτημα. Προσθέτοντας το /^\/r\// εδώ,
+        // αυτά τα requests παρακάμπτουν το service worker fallback και
+        // πηγαίνουν κανονικά στο δίκτυο, όπου τα πιάνει το Function.
+        navigateFallbackDenylist: [/^\/rest\//, /^\/auth\//, /^\/storage\//, /^\/realtime\//, /^\/r\//]
       }
     })
   ],
