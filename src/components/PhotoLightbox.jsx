@@ -139,6 +139,20 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
   // μήνυμα σφάλματος κάτω από το top bar, που εξαφανίζεται μόνο του.
   const [downloadError, setDownloadError] = useState(false);
   const downloadErrorTimerRef = useRef(null);
+  // ΝΕΟ ("ο χρήστης δεν καταλαβαίνει αν έγινε η λήψη"): μήνυμα επιτυχίας +
+  // τικ στο εικονίδιο για ~2.5s μετά από επιτυχημένη λήψη. Κρατάει το κείμενο
+  // του μηνύματος (null = δεν εμφανίζεται).
+  const [downloadDone, setDownloadDone] = useState(null);
+  const downloadDoneTimerRef = useRef(null);
+  const showDownloadDone = (message) => {
+    setDownloadDone(message);
+    clearTimeout(downloadDoneTimerRef.current);
+    downloadDoneTimerRef.current = setTimeout(() => setDownloadDone(null), 2500);
+  };
+  useEffect(() => () => {
+    clearTimeout(downloadDoneTimerRef.current);
+    clearTimeout(downloadErrorTimerRef.current);
+  }, []);
 
   // ΔΙΟΡΘΩΣΗ ("το download icon δεν κάνει τίποτα, μόνο loading"): το spinner
   // σταματούσε ΜΟΝΟ όταν ολοκληρωνόταν το fetch ή το navigator.share - αν
@@ -206,6 +220,7 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
     if (!currentPhoto || downloading) return;
     setDownloading(true);
     setDownloadError(false);
+    setDownloadDone(null);
     try {
       const isVideo = currentPhoto.media_type === 'video';
       const pre = prefetchRef.current;
@@ -233,6 +248,7 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
         }
       }
       if (!shared) triggerClassicDownload(blob, fileName);
+      showDownloadDone(shared ? 'Ολοκληρώθηκε' : 'Αποθηκεύτηκε στη συσκευή σου');
     } catch (err) {
       {
         console.log('download error', err?.message);
@@ -729,6 +745,10 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
         >
           {downloading ? (
             <span style={styles.deleteSpinner} />
+          ) : downloadDone ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#D9B54A" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 12.5l4.5 4.5L19 7.5" />
+            </svg>
           ) : (
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#D9B54A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 3v12" />
@@ -738,6 +758,12 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
           )}
         </button>
       </div>
+
+      {downloadDone && (
+        <div style={styles.downloadDoneToast} role="status">
+          ✓ {downloadDone}
+        </div>
+      )}
 
       {downloadError && (
         <div style={styles.downloadErrorToast}>
@@ -880,6 +906,21 @@ const styles = {
     background: 'rgba(10, 22, 40, 0.92)',
     border: '1px solid rgba(228, 72, 63, 0.5)',
     color: '#fff',
+    fontSize: '13px',
+    fontWeight: '600',
+    padding: '8px 16px',
+    borderRadius: '999px',
+    zIndex: 25,
+    whiteSpace: 'nowrap'
+  },
+  downloadDoneToast: {
+    position: 'absolute',
+    top: 'calc(60px + env(safe-area-inset-top) + 10px)',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    background: 'rgba(10, 22, 40, 0.92)',
+    border: '1px solid rgba(217, 181, 74, 0.6)',
+    color: '#D9B54A',
     fontSize: '13px',
     fontWeight: '600',
     padding: '8px 16px',
