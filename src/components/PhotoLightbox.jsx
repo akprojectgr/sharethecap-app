@@ -140,34 +140,101 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
   const [downloadError, setDownloadError] = useState(false);
   const downloadErrorTimerRef = useRef(null);
 
+  // ΔΙΟΡΘΩΣΗ ("το download icon δεν κάνει τίποτα, μόνο loading"): το spinner
+  // σταματούσε ΜΟΝΟ όταν ολοκληρωνόταν το fetch ή το navigator.share - αν
+  // κάποιο από τα δύο έμενε pending (αργό/κολλημένο δίκτυο, ή share dialog
+  // σε desktop που δεν ολοκληρώνεται), το κουμπί έμενε για πάντα σε loading,
+  // χωρίς μήνυμα. Τώρα:
+  //  1. Το fetch έχει timeout (AbortController) και ελέγχει response.ok.
+  //  2. Η λήψη φωτογραφίας ξεκινά ΗΔΗ στο παρασκήνιο μόλις ανοίξει η
+  //     φωτογραφία (prefetch). Έτσι στο tap το blob είναι έτοιμο και το
+  //     navigator.share καλείται ΑΜΕΣΩΣ, μέσα στο user gesture (σε iOS/Safari
+  //     αλλιώς απορρίπτεται με NotAllowedError αν περάσουν δευτερόλεπτα
+  //     fetch πριν το share).
+  //  3. Το Web Share API χρησιμοποιείται ΜΟΝΟ σε συσκευές αφής (κινητό/
+  //     tablet). Σε desktop κατεβαίνει κατευθείαν με <a download>.
+  //  4. Αν το share αποτύχει (εκτός από ακύρωση χρήστη), πέφτουμε σε
+  //     κλασικό download αντί να δείχνουμε σφάλμα.
+  //  5. Η επέκταση προκύπτει από το πραγματικό MIME type του αρχείου.
+  const prefetchRef = useRef({ id: null, promise: null });
+
+  const fetchMediaBlob = async (url, timeoutMs) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.blob();
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // Prefetch μόνο για φωτογραφίες (τα βίντεο είναι βαριά - κατεβαίνουν μόνο
+  // όταν ο χρήστης πατήσει πραγματικά λήψη).
+  useEffect(() => {
+    const photoNow = list[index];
+    if (!photoNow || photoNow.media_type === 'video') {
+      prefetchRef.current = { id: null, promise: null };
+      return;
+    }
+    const promise = fetchMediaBlob(getPhotoUrl(photoNow.file_path), 60000).catch(() => null);
+    prefetchRef.current = { id: photoNow.id, promise };
+  }, [index]);
+
+  const triggerClassicDownload = (blob, fileName) => {
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+  };
+
+  const extFromMime = (mime, isVideo) => {
+    const map = {
+      'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+      'image/heic': 'heic', 'image/heif': 'heif', 'image/gif': 'gif',
+      'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm'
+    };
+    return map[mime] || (isVideo ? 'mp4' : 'jpg');
+  };
+
   const handleDownload = async () => {
     if (!currentPhoto || downloading) return;
     setDownloading(true);
     setDownloadError(false);
     try {
-      const url = getPhotoUrl(currentPhoto.file_path);
-      const response = await fetch(url);
-      const blob = await response.blob();
-      const ext = currentPhoto.media_type === 'video' ? 'mp4' : 'jpg';
-      const fileName = `sharethecap-${currentPhoto.id || Date.now()}.${ext}`;
-      const file = new File([blob], fileName, { type: blob.type });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file] });
-      } else {
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = fileName;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(blobUrl);
+      const isVideo = currentPhoto.media_type === 'video';
+      const pre = prefetchRef.current;
+      let blob = null;
+      if (!isVideo && pre.id === currentPhoto.id && pre.promise) {
+        blob = await pre.promise;
       }
+      if (!blob) {
+        blob = await fetchMediaBlob(getPhotoUrl(currentPhoto.file_path), isVideo ? 180000 : 45000);
+      }
+      const mime = blob.type && blob.type !== 'application/octet-stream' ? blob.type : (isVideo ? 'video/mp4' : 'image/jpeg');
+      const fileName = `sharethecap-${currentPhoto.id || Date.now()}.${extFromMime(mime, isVideo)}`;
+      const file = new File([blob], fileName, { type: mime });
+
+      const isTouchDevice = window.matchMedia?.('(pointer: coarse)').matches;
+      let shared = false;
+      if (isTouchDevice && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file] });
+          shared = true;
+        } catch (shareErr) {
+          // Ακύρωση από τον χρήστη: τίποτα άλλο να γίνει.
+          if (shareErr?.name === 'AbortError') return;
+          // Οτιδήποτε άλλο (π.χ. NotAllowedError): fallback σε κλασικό download.
+        }
+      }
+      if (!shared) triggerClassicDownload(blob, fileName);
     } catch (err) {
-      // Ο χρήστης μπορεί απλά να έκλεισε/ακύρωσε το native share sheet
-      // (AbortError) - δεν είναι πραγματικό σφάλμα, αγνοείται σιωπηλά.
-      if (err?.name !== 'AbortError') {
+      {
         console.log('download error', err?.message);
         setDownloadError(true);
         clearTimeout(downloadErrorTimerRef.current);
