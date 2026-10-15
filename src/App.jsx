@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useKlevSession, getSavedGuestName } from './lib/useKlevSession';
 import { useEventPhotos } from './lib/useEventPhotos';
@@ -125,6 +125,7 @@ export default function KlevApp() {
     showSettings,
     setShowSettings,
     error,
+    setError,
     joining,
     handleLogin,
     handleGuestContinue,
@@ -179,6 +180,21 @@ export default function KlevApp() {
 
   // Δυναμικό background από τη βάση (bg_color) ή fallback στο προεπιλεγμένο
   const eventBg = currentEvent?.bg_color || '#16325C';
+
+  // ΔΙΟΡΘΩΣΗ ("το κόκκινο μήνυμα σφάλματος μένει για πάντα στην οθόνη"):
+  // το banner πιο κάτω (error || uploadError) δεν είχε ΚΑΘΟΛΟΥ auto-dismiss -
+  // έμενε ορατό μέχρι ο guest να κάνει κάποια άλλη ενέργεια που τυχαία το
+  // καθάριζε (π.χ. άνοιγμα νέου file picker). Αφού πρόκειται για μήνυμα
+  // τύπου toast (π.χ. "το βίντεο είναι πολύ μεγάλο"), πρέπει να εξαφανίζεται
+  // μόνο του μετά από λίγα δευτερόλεπτα, όχι να μένει κολλημένο επ' αόριστον.
+  useEffect(() => {
+    if (!error && !uploadError) return;
+    const timer = setTimeout(() => {
+      if (error) setError('');
+      if (uploadError) setUploadError('');
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [error, uploadError, setError, setUploadError]);
 
   if (checkingUrlCode) {
     return (
