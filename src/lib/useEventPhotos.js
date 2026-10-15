@@ -22,7 +22,7 @@ import { acquireUploadBusy, releaseUploadBusy } from './uploadBusy';
 // χάνεται/περιορίζεται εδώ), μόνο που τώρα ανεβαίνει ΚΑΙ μια "fast-start"
 // εκδοχή ειδικά για άμεσο playback στο lightbox. Το όριο μένει μόνο ως
 // γενικό safety cap.
-const MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024; // 500MB (ταιριάζει με το bucket limit στο Supabase)
+const MAX_VIDEO_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB (ταιριάζει με το bucket limit στο Supabase - ανέβηκε από 500MB->1GB)
 
 // ΔΙΟΡΘΩΣΗ (design review - "όταν ανοίγω ένα βίντεο δεν θέλω να περιμένει ο
 // χρήστης να φορτώσει, να ανοίγει κατευθείαν αμέσα" + "δεν θέλω να πληρώνω"):
@@ -176,18 +176,6 @@ function isRetryableNetworkError(err) {
   );
 }
 
-function sanitizeFileName(name, fallback) {
-  const raw = String(name || '').trim();
-  const dot = raw.lastIndexOf('.');
-  const base = dot > 0 ? raw.slice(0, dot) : raw;
-  const ext = dot > 0 ? raw.slice(dot + 1) : '';
-  const clean = (s) => s.normalize('NFD').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-  const cleanBase = clean(base).slice(0, 60);
-  const cleanExt = clean(ext).toLowerCase().slice(0, 8);
-  if (!cleanExt) return cleanBase ? `${cleanBase}.${fallback.split('.').pop()}` : fallback;
-  return `${cleanBase || fallback.split('.')[0]}.${cleanExt}`;
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -254,10 +242,11 @@ function logUploadError(args) {
 // Ανώτατο όριο αναμονής ανά αρχείο - πιο γενναιόδωρο για βίντεο (μεγαλύτερα
 // αρχεία, φυσιολογικά πιο αργά) απ' ό,τι για φωτογραφίες.
 const UPLOAD_TIMEOUT_MS_PHOTO = 45 * 1000; // 45 δευτ.
-// Ανέβηκε από 2 σε 5 λεπτά μαζί με το όριο μεγέθους (200MB -> 500MB) - ένα
+// Ανέβηκε από 2 σε 5 λεπτά μαζί με το όριο μεγέθους (200MB -> 500MB), και
+// τώρα από 5 σε 10 λεπτά μαζί με το νέο όριο (500MB -> 1GB) - ένα
 // μεγαλύτερο 4K βίντεο σε αργότερο δίκτυο χρειάζεται φυσιολογικά παραπάνω
 // χρόνο· αλλιώς θα "κόβαμε" σωστά ανεβάσματα μόνο επειδή αργούν λίγο παραπάνω.
-const UPLOAD_TIMEOUT_MS_VIDEO = 300 * 1000; // 5 λεπτά
+const UPLOAD_TIMEOUT_MS_VIDEO = 600 * 1000; // 10 λεπτά
 // ΔΙΟΡΘΩΣΗ (code review - "κολλάει για πάντα στο upload"): το κύριο αρχείο
 // είχε ήδη withTimeout, αλλά το preview upload (μικρή JPEG εικόνα) και το
 // DB insert ΔΕΝ είχαν - αν το δίκτυο κολλήσει ΜΕΤΑ την επιτυχή ανάρτηση του
@@ -763,10 +752,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
         currentFileForLog = file;
         setUploadProgress({ current: i + 1, total: pendingFiles.length });
         const isVideo = isVideoFile(file);
-        // Το Supabase Storage απορρίπτει κλειδιά με ελληνικούς/ειδικούς
-        // χαρακτήρες ("Invalid key") - π.χ. "Στιγμιότυπο οθόνης.png" ή "#1.jpg".
-        // Κρατάμε μόνο λατινικά/αριθμούς/._- στο όνομα του αρχείου.
-        const safeName = sanitizeFileName(file.name, isVideo ? 'video.mp4' : 'photo.jpg');
+        const safeName = file.name || (isVideo ? 'video.mp4' : 'photo.jpg');
         const fileName = `${currentEvent.id}/${Date.now()}_${safeName}`;
 
         // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
@@ -784,8 +770,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
                 .upload(fileName, file, {
                   cacheControl: '3600',
                   upsert: false,
-                  // Χωρίς ";codecs=..." - το bucket δέχεται μόνο καθαρά image/* / video/*.
-                  contentType: (file.type || (isVideo ? 'video/mp4' : 'image/jpeg')).split(';')[0].trim()
+                  contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg')
                 }),
               isVideo ? UPLOAD_TIMEOUT_MS_VIDEO : UPLOAD_TIMEOUT_MS_PHOTO,
               'main_upload'
