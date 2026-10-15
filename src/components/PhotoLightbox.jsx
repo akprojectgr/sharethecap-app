@@ -170,6 +170,23 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
   //  4. Αν το share αποτύχει (εκτός από ακύρωση χρήστη), πέφτουμε σε
   //     κλασικό download αντί να δείχνουμε σφάλμα.
   //  5. Η επέκταση προκύπτει από το πραγματικό MIME type του αρχείου.
+  //  6. ΔΙΟΡΘΩΣΗ ("στο κινητό μένει για πάντα σε loading, δεν ξέρεις αν
+  //     έγινε η λήψη" - bug μετά το παραπάνω): το navigator.share() ΔΕΝ έχει
+  //     καμία εγγύηση ότι θα resolve/reject ποτέ - αν χαθεί το "user
+  //     activation" (π.χ. το await του fetch πριν το share πήρε
+  //     παραπάνω από ένα-δυο microtask ticks, κάτι σχεδόν σίγουρο για
+  //     βίντεο που ΔΕΝ γίνονται ποτέ prefetch, ή για φωτογραφία πριν
+  //     προλάβει να ολοκληρωθεί το prefetch), το Safari/WebKit σε
+  //     ορισμένες εκδόσεις απλά ΔΕΝ ανοίγει το sheet ΚΑΙ δεν απορρίπτει
+  //     ποτέ το Promise - κρεμάει επ' αόριστον. Το downloading παρέμενε
+  //     true για πάντα, ο χρήστης έβλεπε το spinner "κολλημένο" χωρίς καμία
+  //     ένδειξη αν τελικά κατέβηκε κάτι. Λύση: shareFileWithTimeout()
+  //     παρακάτω - αγωνίζεται το navigator.share() ενάντια σε ένα ρολόι·
+  //     αν δεν απαντήσει μέσα στο όριο, σταματάμε το spinner χωρίς να
+  //     ισχυριστούμε επιτυχία/αποτυχία (μπορεί το sheet να είναι ακόμα
+  //     ανοιχτό - απλά δεν το "κολλάμε" άλλο στο UI μας) και ΔΕΝ κάνουμε
+  //     fallback σε classic download (θα ήταν διπλή λήψη αν ο χρήστης
+  //     τελικά αποθήκευνε κανονικά μέσα από το sheet).
   const prefetchRef = useRef({ id: null, promise: null });
 
   const fetchMediaBlob = async (url, timeoutMs) => {
@@ -182,6 +199,24 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
     } finally {
       clearTimeout(timer);
     }
+  };
+
+  // Αγωνίζεται το navigator.share() ενάντια σε ένα ρολόι ασφαλείας - βλ.
+  // σχόλιο #6 πιο πάνω. Σε φυσιολογική χρήση (ο χρήστης επιλέγει κάτι στο
+  // sheet μέσα σε λίγα δευτερόλεπτα) δεν επηρεάζει τίποτα· υπάρχει ΜΟΝΟ
+  // για να μην κρεμάσει ποτέ ξανά το UI επ' αόριστον.
+  const SHARE_TIMEOUT_MS = 20000;
+  const shareFileWithTimeout = (file, timeoutMs) => {
+    return Promise.race([
+      navigator.share({ files: [file] }),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          const timeoutErr = new Error('share timed out');
+          timeoutErr.name = 'ShareTimeout';
+          reject(timeoutErr);
+        }, timeoutMs);
+      })
+    ]);
   };
 
   // Prefetch μόνο για φωτογραφίες (τα βίντεο είναι βαριά - κατεβαίνουν μόνο
@@ -239,11 +274,17 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
       let shared = false;
       if (isTouchDevice && navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
-          await navigator.share({ files: [file] });
+          await shareFileWithTimeout(file, SHARE_TIMEOUT_MS);
           shared = true;
         } catch (shareErr) {
           // Ακύρωση από τον χρήστη: τίποτα άλλο να γίνει.
           if (shareErr?.name === 'AbortError') return;
+          // Το native sheet "κρέμασε" πέρα από το ρολόι ασφαλείας - δεν
+          // ξέρουμε αν ο χρήστης τελικά αποθήκευσε κάτι από εκεί (μπορεί
+          // να είναι ακόμα ανοιχτό). ΔΕΝ κάνουμε fallback σε classic
+          // download εδώ (θα ήταν δεύτερη/διπλή λήψη) - απλά σταματάμε το
+          // spinner μας χωρίς να ισχυριστούμε επιτυχία ή αποτυχία.
+          if (shareErr?.name === 'ShareTimeout') return;
           // Οτιδήποτε άλλο (π.χ. NotAllowedError): fallback σε κλασικό download.
         }
       }
@@ -741,7 +782,7 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
           onClick={handleDownload}
           disabled={downloading}
           style={styles.iconBtn}
-          aria-label="αποθήκευση στη συλλογή"
+          aria-label="κοινοποίηση / αποθήκευση"
         >
           {downloading ? (
             <span style={styles.deleteSpinner} />
@@ -750,10 +791,23 @@ export default function PhotoLightbox({ photos = [], currentIndex = 0, photo, ge
               <path d="M5 12.5l4.5 4.5L19 7.5" />
             </svg>
           ) : (
+            // ΔΙΟΡΘΩΣΗ ("πιο επαγγελματικό/clear στον χρήστη" - feedback):
+            // πριν ήταν εικονίδιο "download" (βελάκι προς τα κάτω σε
+            // συρτάρι) - έδειχνε σαν να θα κατέβει το αρχείο κατευθείαν με
+            // ένα tap. Στην πραγματικότητα ΠΑΝΤΑ ανοίγει το native share
+            // sheet (Save Image + Instagram/Facebook/TikTok/κλπ αν είναι
+            // εγκατεστημένα) - δεν αλλάξαμε καθόλου τη λογική
+            // (handleDownload παραμένει ίδιο), μόνο το εικονίδιο, ώστε να
+            // ταιριάζει με αυτό που πραγματικά συμβαίνει: το universal
+            // "share" icon (βελάκι προς τα πάνω που βγαίνει από ανοιχτό
+            // κουτί - ίδιο με το iOS Share icon) αντί για "download". Έτσι
+            // ο χρήστης ξέρει εκ των προτέρων ότι θα ανοίξει μενού
+            // επιλογών, όχι άμεση λήψη - καμία αλλαγή συμπεριφοράς, μόνο
+            // σωστή προσδοκία.
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#D9B54A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 3v12" />
-              <path d="M7.5 10.5L12 15l4.5-4.5" />
-              <path d="M5 19h14" />
+              <path d="M12 15V3" />
+              <path d="M7.5 7.5L12 3l4.5 4.5" />
+              <path d="M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" />
             </svg>
           )}
         </button>
