@@ -210,6 +210,24 @@ function tusUploadVideo(file, fileName, { onProgress } = {}) {
       // ειδικά σχεδιασμένο για resumable uploads (ξαναδοκιμάζει ΜΟΝΟ το
       // σημείο που κόπηκε, όχι απ' την αρχή).
       retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
+      // ΔΙΟΡΘΩΣΗ v5 ("ακόμα και ΜΙΚΡΑ βίντεο (858KB) αποτυγχάνουν αμέσως με
+      // 'Failed to fetch' μέσω TUS, ενώ οι φωτογραφίες [απλό POST upload]
+      // ΠΕΡΝΑΝΕ κανονικά στο ΙΔΙΟ δίκτυο/συσκευή" - επιβεβαιώθηκε ότι το TUS
+      // fix ήταν ήδη live όταν συνέβη αυτό): το πρωτόκολλο TUS χρησιμοποιεί
+      // HTTP method PATCH για να στείλει κάθε chunk μετά το αρχικό POST.
+      // Πολλά mobile carrier δίκτυα (ειδικά σε prepaid/budget data plans σε
+      // ορισμένες περιοχές) έχουν transparent proxies που μπλοκάρουν ή
+      // "σπάνε" λιγότερο συνηθισμένα HTTP methods σαν το PATCH, ενώ αφήνουν
+      // κανονικά GET/POST να περάσουν απρόσκοπτα - αυτό εξηγεί γιατί η
+      // αποτυχία ήταν ΑΜΕΣΗ και ΑΝΕΞΑΡΤΗΤΗ από το μέγεθος του βίντεο (ακόμα
+      // και ένα μοναδικό chunk των 858KB δεν ολοκληρωνόταν ΠΟΤΕ, ενώ τα
+      // POST-based photo uploads δούλευαν μια χαρά στο ΙΔΙΟ δίκτυο/κινητό).
+      // Το overridePatchMethod είναι ακριβώς το επίσημο workaround του
+      // tus-js-client γι' αυτό το σενάριο: στέλνει το chunk σαν ΚΑΝΟΝΙΚΟ POST
+      // με ένα header "X-HTTP-Method-Override: PATCH" αντί για πραγματικό
+      // PATCH request - ο server (Supabase/tusd) το αναγνωρίζει κανονικά,
+      // αλλά ο carrier proxy το βλέπει σαν ένα απλό POST και δεν το μπλοκάρει.
+      overridePatchMethod: true,
       headers: {
         authorization: `Bearer ${supabaseAnonKey}`,
         'x-upsert': 'false'
@@ -883,25 +901,62 @@ export function useEventPhotos(currentEvent, guestData, user) {
           // αρχείο: τα βίντεο ανεβαίνουν τώρα με resumable (TUS) upload αντί
           // για ένα ενιαίο fetch, ώστε ένα "κόψιμο" στη μέση σε ασταθές
           // δίκτυο να ΣΥΝΕΧΙΖΕΙ από εκεί που έμεινε αντί να ξαναρχίζει απ'
-          // την αρχή. Το tus-js-client έχει ΔΙΚΟ του retry logic
-          // (retryDelays) ειδικό για αυτό - δεν χρειάζεται το γενικό
-          // withNetworkRetry εδώ. Κρατάμε πάντα το withTimeout σαν ΤΕΛΙΚΟ
-          // safety net (10 λεπτά) για να μην κολλήσει το UI επ' αόριστον σε
-          // ένα ακραίο σενάριο όπου ΤΙΠΟΤΑ δεν δουλεύει.
-          uploadData = await withTimeout(
-            tusUploadVideo(file, fileName, {
-              onProgress: (bytesUploaded, bytesTotal) => {
-                const pct = bytesTotal ? Math.round((bytesUploaded / bytesTotal) * 100) : 0;
-                setUploadProgress({
-                  current: completedCount,
-                  total: pendingFiles.length,
-                  videoProgress: pct
-                });
+          // την αρχή. Κρατάμε πάντα το withTimeout σαν ΤΕΛΙΚΟ safety net
+          // (10 λεπτά) για να μην κολλήσει το UI επ' αόριστον.
+          //
+          // ΔΙΟΡΘΩΣΗ v5 ("ακόμα και ΜΙΚΡΑ βίντεο αποτυγχάνουν μέσω TUS σε
+          // συγκεκριμένα carrier δίκτυα" - βλ. εκτενές σχόλιο στο
+          // tusUploadVideo για το πιθανό PATCH-blocking): προσθέσαμε το
+          // overridePatchMethod ΕΚΕΙ σαν την κύρια διόρθωση, αλλά ΕΔΩ
+          // προσθέτουμε ΚΑΙ ένα δεύτερο επίπεδο ασφαλείας - αν το TUS
+          // αποτύχει ΤΕΛΕΙΩΣ (εξάντλησε όλα τα δικά του retries), πέφτουμε
+          // αυτόματα πίσω στο ΠΑΛΙΟ, αποδεδειγμένα αξιόπιστο απλό upload
+          // (ίδιο με των φωτογραφιών) αντί να παραδεχτούμε αποτυχία αμέσως -
+          // έτσι ΔΕΝ χειροτερεύουμε ποτέ σε σχέση με πριν, μόνο βελτιωνόμαστε
+          // όπου το TUS δουλεύει.
+          try {
+            uploadData = await withTimeout(
+              tusUploadVideo(file, fileName, {
+                onProgress: (bytesUploaded, bytesTotal) => {
+                  const pct = bytesTotal ? Math.round((bytesUploaded / bytesTotal) * 100) : 0;
+                  setUploadProgress({
+                    current: completedCount,
+                    total: pendingFiles.length,
+                    videoProgress: pct
+                  });
+                }
+              }),
+              UPLOAD_TIMEOUT_MS_VIDEO,
+              'main_upload_tus'
+            );
+          } catch (tusErr) {
+            console.warn('TUS resumable upload βίντεο απέτυχε - fallback σε απλό upload:', tusErr);
+            const { data: fallbackData, error: fallbackError } = await withNetworkRetry(
+              () =>
+                withTimeout(
+                  supabase.storage
+                    .from('photos')
+                    .upload(fileName, file, {
+                      cacheControl: '3600',
+                      upsert: false,
+                      contentType: file.type || 'video/mp4'
+                    }),
+                  UPLOAD_TIMEOUT_MS_VIDEO,
+                  'main_upload_fallback'
+                ),
+              {
+                onRetry: (attempt, max) => {
+                  setUploadProgress({
+                    current: completedCount,
+                    total: pendingFiles.length,
+                    retry: { attempt, max }
+                  });
+                }
               }
-            }),
-            UPLOAD_TIMEOUT_MS_VIDEO,
-            'main_upload'
-          );
+            );
+            if (fallbackError) throw fallbackError;
+            uploadData = fallbackData;
+          }
         } else {
           // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
           // μια φωτογραφία πάνω σε αργό/ασταθές δίκτυο μπορεί να κολλήσει το
