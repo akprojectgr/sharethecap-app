@@ -269,10 +269,17 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
                 {/* ΝΕΟ (auto-retry): όσο γίνεται retry λόγω στιγμιαίου network
                 drop, δείχνουμε "Επανασύνδεση... X/Y" αντί για το σιωπηλό
                 "Παρακαλώ περιμένετε", ώστε ο χρήστης να ξέρει ότι κάτι ξανά
-                δοκιμάζεται - όχι ότι έχει κολλήσει. */}
+                δοκιμάζεται - όχι ότι έχει κολλήσει.
+                ΝΕΟ v4 (resumable/TUS video upload - βλ. tusUploadVideo στο
+                useEventPhotos.js): για βίντεο δείχνουμε πλέον πραγματικό
+                ποσοστό % προόδου αντί για το γενικό "Παρακαλώ περιμένετε" -
+                σημαντικό ειδικά για μεγάλα βίντεο σε αργό δίκτυο, ώστε ο
+                guest να βλέπει ότι όντως προχωράει, όχι ότι έχει κολλήσει. */}
                 <span>
                   {uploadProgress?.retry
                     ? `Επανασύνδεση... προσπάθεια ${uploadProgress.retry.attempt}/${uploadProgress.retry.max}`
+                    : typeof uploadProgress?.videoProgress === 'number'
+                    ? `Ανέβασμα βίντεο... ${uploadProgress.videoProgress}%`
                     : 'Παρακαλώ περιμένετε'}
                 </span>
               </div>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase, supabaseUrl, supabaseAnonKey } from './supabaseClient';
+import * as tus from 'tus-js-client';
 import heic2any from 'heic2any';
 // ΔΙΟΡΘΩΣΗ (code review - "case-sensitivity", βρέθηκε με πραγματικό build):
 // τα πραγματικά αρχεία είναι 'Deletetokens.js' και 'Imagepreview.js'.
@@ -178,6 +179,83 @@ function isRetryableNetworkError(err) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ΔΙΟΡΘΩΣΗ v4 ("το ίδιο βίντεο αποτυγχάνει επανειλημμένα σε αδύναμο δίκτυο
+// venue, πάντα 'Failed to fetch', ΠΟΤΕ timeout" - επιβεβαιώθηκε από τα
+// πραγματικά logs στο upload_errors table: 6+ συνεχόμενες αποτυχίες για το
+// ΙΔΙΟ 25MB βίντεο, ενώ ΟΛΕΣ οι φωτογραφίες στο ίδιο batch/δίκτυο ανέβηκαν
+// κανονικά): ένα απλό fetch() με ΟΛΟΚΛΗΡΟ το αρχείο σαν ενιαίο σώμα
+// αιτήματος είναι εύθραυστο σε ασταθές κινητό δίκτυο - αν η σύνδεση "κοπεί"
+// έστω και για μισό δευτερόλεπτο ΣΤΗ ΜΕΣΗ ενός 25MB ανεβάσματος (πολύ
+// συχνό σε venue με αδύναμο σήμα/πολλούς χρήστες μαζί στο ίδιο wifi),
+// ΟΛΟΚΛΗΡΟ το αρχείο πρέπει να ξαναρχίσει απ' την αρχή - σε αρκετά ασταθές
+// δίκτυο αυτό μπορεί να μην τα καταφέρει ΠΟΤΕ, όσες φορές κι αν
+// ξαναδοκιμάσουμε απλά (ακριβώς αυτό έδειχναν τα logs).
+//
+// Λύση: το Supabase Storage υποστηρίζει το πρωτόκολλο TUS (resumable
+// upload) - το αρχείο ανεβαίνει σε κομμάτια (chunks) των 6MB, και αν
+// κολλήσει η σύνδεση στη μέση, το tus-js-client συνεχίζει ΑΠΟ ΤΟ ΣΗΜΕΙΟ
+// ΠΟΥ ΕΜΕΙΝΕ (ή έστω από το τελευταίο ολοκληρωμένο chunk) αντί να ξαναστείλει
+// ΟΛΟΚΛΗΡΟ το αρχείο απ' την αρχή - πολύ πιο ανθεκτικό σε ασταθές δίκτυο.
+// Χρησιμοποιείται ΜΟΝΟ για βίντεο (οι φωτογραφίες είναι ήδη αρκετά μικρές
+// ώστε να ανεβαίνουν αξιόπιστα με το απλό upload - καμία αποτυχία
+// φωτογραφίας στα πραγματικά logs του test).
+function tusUploadVideo(file, fileName, { onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const upload = new tus.Upload(file, {
+      endpoint: `${supabaseUrl}/storage/v1/upload/resumable`,
+      // retryDelays: το ΔΙΚΟ του εσωτερικό retry του tus-js-client -
+      // ειδικά σχεδιασμένο για resumable uploads (ξαναδοκιμάζει ΜΟΝΟ το
+      // σημείο που κόπηκε, όχι απ' την αρχή).
+      retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
+      headers: {
+        authorization: `Bearer ${supabaseAnonKey}`,
+        'x-upsert': 'false'
+      },
+      uploadDataDuringCreation: true,
+      removeFingerprintOnSuccess: true,
+      metadata: {
+        bucketName: 'photos',
+        objectName: fileName,
+        contentType: file.type || 'video/mp4',
+        cacheControl: '3600'
+      },
+      chunkSize: 6 * 1024 * 1024, // ΥΠΟΧΡΕΩΤΙΚΟ 6MB - απαίτηση του Supabase TUS endpoint (δεν αλλάζει)
+      onError: (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      },
+      onProgress: (bytesUploaded, bytesTotal) => {
+        if (onProgress) onProgress(bytesUploaded, bytesTotal);
+      },
+      onSuccess: () => {
+        if (settled) return;
+        settled = true;
+        resolve({ path: fileName });
+      }
+    });
+
+    // Αν υπάρχει ΗΔΗ μια ημιτελής προσπάθεια γι' αυτό ΑΚΡΙΒΩΣ το αρχείο
+    // (π.χ. ο guest ξανακλείδωσε/ξανάνοιξε την καρτέλα στη μέση), το
+    // tus-js-client τη βρίσκει μέσω fingerprint και συνεχίζει από εκεί -
+    // αλλιώς ξεκινάει κανονικά από την αρχή.
+    upload
+      .findPreviousUploads()
+      .then((previousUploads) => {
+        if (previousUploads.length > 0) {
+          upload.resumeFromPreviousUpload(previousUploads[0]);
+        }
+        upload.start();
+      })
+      .catch(() => {
+        // Αν αποτύχει ο έλεγχος προηγούμενων uploads (σπάνιο/μη κρίσιμο),
+        // ξεκινάμε απλά από την αρχή - δεν μπλοκάρει το upload.
+        upload.start();
+      });
+  });
 }
 
 const UPLOAD_RETRY_MAX = 2; // επιπλέον προσπάθειες μετά την πρώτη (σύνολο έως 3)
@@ -799,41 +877,72 @@ export function useEventPhotos(currentEvent, guestData, user) {
         const safeName = file.name || (isVideo ? 'video.mp4' : 'photo.jpg');
         const fileName = `${currentEvent.id}/${Date.now()}_${safeName}`;
 
-        // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
-        // ένα μεγάλο βίντεο πάνω σε αργό/ασταθές δίκτυο μπορεί να κολλήσει
-        // το UI επ' αόριστον σε "uploading" χωρίς ΚΑΝΕΝΑ error.
-        // withNetworkRetry γύρω-γύρω - βλ. εκτενές σχόλιο στην κορυφή του
-        // αρχείου: ξαναδοκιμάζει αυτόματα μόνο σε στιγμιαία δικτυακά σφάλματα
-        // ("Failed to fetch"), ενημερώνοντας το uploadProgress ώστε το UI να
-        // δείχνει "Επανασύνδεση..." αντί να μένει σιωπηλό.
-        const { data: uploadData, error: uploadError } = await withNetworkRetry(
-          () =>
-            withTimeout(
-              supabase.storage
-                .from('photos')
-                .upload(fileName, file, {
-                  cacheControl: '3600',
-                  upsert: false,
-                  contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg')
-                }),
-              isVideo ? UPLOAD_TIMEOUT_MS_VIDEO : UPLOAD_TIMEOUT_MS_PHOTO,
-              'main_upload'
-            ),
-          {
-            onRetry: (attempt, max) => {
-              setUploadProgress({
-                current: completedCount,
-                total: pendingFiles.length,
-                retry: { attempt, max }
-              });
+        let uploadData;
+        if (isVideo) {
+          // ΔΙΟΡΘΩΣΗ v4 - βλ. εκτενές σχόλιο στο tusUploadVideo πιο πάνω στο
+          // αρχείο: τα βίντεο ανεβαίνουν τώρα με resumable (TUS) upload αντί
+          // για ένα ενιαίο fetch, ώστε ένα "κόψιμο" στη μέση σε ασταθές
+          // δίκτυο να ΣΥΝΕΧΙΖΕΙ από εκεί που έμεινε αντί να ξαναρχίζει απ'
+          // την αρχή. Το tus-js-client έχει ΔΙΚΟ του retry logic
+          // (retryDelays) ειδικό για αυτό - δεν χρειάζεται το γενικό
+          // withNetworkRetry εδώ. Κρατάμε πάντα το withTimeout σαν ΤΕΛΙΚΟ
+          // safety net (10 λεπτά) για να μην κολλήσει το UI επ' αόριστον σε
+          // ένα ακραίο σενάριο όπου ΤΙΠΟΤΑ δεν δουλεύει.
+          uploadData = await withTimeout(
+            tusUploadVideo(file, fileName, {
+              onProgress: (bytesUploaded, bytesTotal) => {
+                const pct = bytesTotal ? Math.round((bytesUploaded / bytesTotal) * 100) : 0;
+                setUploadProgress({
+                  current: completedCount,
+                  total: pendingFiles.length,
+                  videoProgress: pct
+                });
+              }
+            }),
+            UPLOAD_TIMEOUT_MS_VIDEO,
+            'main_upload'
+          );
+        } else {
+          // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
+          // μια φωτογραφία πάνω σε αργό/ασταθές δίκτυο μπορεί να κολλήσει το
+          // UI επ' αόριστον σε "uploading" χωρίς ΚΑΝΕΝΑ error.
+          // withNetworkRetry γύρω-γύρω - βλ. εκτενές σχόλιο στην κορυφή του
+          // αρχείου: ξαναδοκιμάζει αυτόματα μόνο σε στιγμιαία δικτυακά
+          // σφάλματα ("Failed to fetch"), ενημερώνοντας το uploadProgress
+          // ώστε το UI να δείχνει "Επανασύνδεση..." αντί να μένει σιωπηλό.
+          // (Οι φωτογραφίες είναι ήδη αρκετά μικρές ώστε ένα απλό upload να
+          // είναι αξιόπιστο - βλ. σχόλιο στο tusUploadVideo για γιατί ΔΕΝ
+          // χρειάζονται κι αυτές resumable upload.)
+          const { data, error: uploadError } = await withNetworkRetry(
+            () =>
+              withTimeout(
+                supabase.storage
+                  .from('photos')
+                  .upload(fileName, file, {
+                    cacheControl: '3600',
+                    upsert: false,
+                    contentType: file.type || 'image/jpeg'
+                  }),
+                UPLOAD_TIMEOUT_MS_PHOTO,
+                'main_upload'
+              ),
+            {
+              onRetry: (attempt, max) => {
+                setUploadProgress({
+                  current: completedCount,
+                  total: pendingFiles.length,
+                  retry: { attempt, max }
+                });
+              }
             }
-          }
-        );
-        // Το retry ολοκληρώθηκε (πέτυχε ή εξάντλησε τις προσπάθειες) -
-        // καθαρίζουμε την ένδειξη "Επανασύνδεση..." από το progress.
+          );
+          if (uploadError) throw uploadError;
+          uploadData = data;
+        }
+        // Ό,τι retry/progress ένδειξη ήταν ενεργή ολοκληρώθηκε (πέτυχε ή
+        // εξάντλησε τις προσπάθειες) - καθαρίζουμε την ένδειξη από το
+        // progress πριν προχωρήσουμε στα επόμενα βήματα αυτού του αρχείου.
         setUploadProgress({ current: completedCount, total: pendingFiles.length });
-
-        if (uploadError) throw uploadError;
 
         // ΔΙΟΡΘΩΣΗ (design review - "δεν νομίζω ότι ενδιαφέρει τον χρήστη ότι
         // γίνεται συμπίεση, δεν είναι ωραίο να περιμένει το άγνωστο"): η
