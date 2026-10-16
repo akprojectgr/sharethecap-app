@@ -723,34 +723,78 @@ export function useEventPhotos(currentEvent, guestData, user) {
     // υπάρχει ορατή ένδειξη προόδου από το ΠΡΩΤΟ frame μετά το κλικ.
     setUploadProgress({ current: pendingFiles.length > 0 ? 1 : 0, total: pendingFiles.length });
 
-    // Κρατάει ποιο αρχείο ήταν "στο χέρι" τη στιγμή που έσκασε το catch
-    // παρακάτω - ώστε το logUploadError να ξέρει ΤΙ ακριβώς απέτυχε (όνομα/
-    // μέγεθος/τύπο), όχι μόνο ότι "κάτι" απέτυχε.
-    let currentFileForLog = null;
+    // Screen Wake Lock (βλ. εκτενές σχόλιο v3 πιο κάτω στο γιατί): κρατάει
+    // την οθόνη ξύπνια όσο διαρκεί το ανέβασμα, όπου υποστηρίζεται (Safari
+    // 16.4+, Chrome/Android) - μειώνει σημαντικά την πιθανότητα το
+    // λειτουργικό να "παγώσει" τα δικτυακά requests λόγω auto-lock της
+    // οθόνης στη μέση ενός μεγάλου batch. Καθαρό best-effort: αν δεν
+    // υποστηρίζεται ή ο browser αρνηθεί (π.χ. χαμηλή μπαταρία), απλά
+    // συνεχίζουμε κανονικά χωρίς αυτό - ΔΕΝ μπλοκάρει ποτέ το upload.
+    let wakeLock = null;
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (wakeLockErr) {
+      console.warn('Screen Wake Lock δεν ενεργοποιήθηκε (μη κρίσιμο):', wakeLockErr);
+    }
 
-    // ΔΙΟΡΘΩΣΗ ("διπλές φωτογραφίες μετά από merikh αποτυχία + retry"): τα
-    // αρχεία ανεβαίνουν ΣΕΙΡΙΑΚΑ (for loop) - αν π.χ. το αρχείο #3 από τα 5
-    // αποτύχει (timeout σε αδύναμο δίκτυο), τα #1 και #2 έχουν ΗΔΗ ανέβει με
-    // επιτυχία (υπάρχουν ήδη στο storage ΚΑΙ στη βάση). Παλιά, το catch
-    // παρακάτω απλά έδειχνε μήνυμα σφάλματος χωρίς να πειράξει καθόλου το
-    // pendingFiles - το modal έμενε με ΟΛΑ τα 5 αρχεία ακόμα "προς αποστολή".
-    // Ο guest, βλέποντας σφάλμα, κάνει το μόνο λογικό: ξαναπατάει
-    // "Αποστολή" - που ξανά-ανεβάζει τα #1 και #2 από την αρχή, εμφανίζοντάς
-    // τα ΔΙΠΛΑ στο gallery. Τώρα μετράμε πόσα ΠΡΑΓΜΑΤΙΚΑ ολοκληρώθηκαν
-    // (successCount) πριν το σφάλμα, και στο catch αφαιρούμε ΜΟΝΟ αυτά από
-    // το pendingFiles/previewUrls - έτσι ένα retry ξαναπροσπαθεί ΜΟΝΟ τα
-    // αρχεία που όντως απέτυχαν/δεν προλάβαμε, ποτέ ξανά αυτά που ήδη πέτυχαν.
+    // ΔΙΟΡΘΩΣΗ v2 ("δεν μπορεί να ανεβάσει 97 φωτογραφίες μαζί" - "Failed to
+    // fetch"): η ΠΑΛΙΑ λογική εδώ σταματούσε ΟΛΟΚΛΗΡΟ το batch με throw μόλις
+    // ΕΝΑ αρχείο απέτυχε (ακόμα κι όταν ο εσωτερικός withNetworkRetry είχε
+    // ήδη εξαντλήσει τις 3 προσπάθειές του) - σε ένα μεγάλο batch πάνω από
+    // αρκετά λεπτά σε venue wifi, είναι σχεδόν σίγουρο ότι ΤΟΥΛΑΧΙΣΤΟΝ ένα
+    // αρχείο θα πέσει πάνω σε μια στιγμιαία διακοπή δικτύου - και μόλις
+    // συνέβαινε αυτό (π.χ. στο αρχείο #11 από τα 97), τα υπόλοιπα 86 δεν
+    // δοκιμάζονταν ΚΑΘΟΛΟΥ· έμεναν στο modal περιμένοντας τον guest να
+    // ξαναπατήσει "Αποστολή" ξανά και ξανά, ένα-ένα σταμάτημα τη φορά - σε
+    // πρακτική χρήση αυτό σήμαινε ότι ΔΕΝ γινόταν ποτέ να ολοκληρωθεί ένα
+    // batch αυτού του μεγέθους. Τώρα κάθε αρχείο έχει το ΔΙΚΟ του try/catch
+    // μέσα στο loop - μια αποτυχία (μετά την εξάντληση των retries) απλά
+    // καταγράφεται και προχωράμε στο ΕΠΟΜΕΝΟ αρχείο, αντί να σταματήσει όλο
+    // το batch. Στο τέλος μαζεύουμε ΠΟΙΑ index απέτυχαν (όχι απλά ένα
+    // συνεχόμενο "successCount" - τώρα μπορεί π.χ. το #11 να αποτύχει αλλά
+    // το #12 να πετύχει) και αφήνουμε στο pendingFiles/previewUrls ΜΟΝΟ αυτά
+    // που πραγματικά απέτυχαν, έτοιμα για ένα ρητό retry.
     let successCount = 0;
-    // Δηλωμένο ΕΞΩ από το try ώστε να είναι προσβάσιμο και μέσα στο catch
-    // παρακάτω (χρειάζεται για να ενημερώσουμε το gallery με τις επιτυχείς
-    // φωτογραφίες ΑΚΟΜΑ κι όταν το batch απέτυχε μερικώς).
+    const failedIndices = [];
+    let firstErr = null;
+    let anyTimeout = false;
+    // Δηλωμένο ΕΞΩ από το loop ώστε να είναι προσβάσιμο μετά (χρειάζεται
+    // για να ενημερώσουμε το gallery με όλες τις επιτυχείς φωτογραφίες,
+    // ακόμα κι όταν κάποιες άλλες στο ίδιο batch απέτυχαν).
     const newUploadedPhotos = [];
 
-    try {
-      for (let i = 0; i < pendingFiles.length; i++) {
-        const file = pendingFiles[i];
-        currentFileForLog = file;
-        setUploadProgress({ current: i + 1, total: pendingFiles.length });
+    // ΔΙΟΡΘΩΣΗ v3 ("σε 97-100 φωτο ανεβάζει μόνο 5-8 και μετά σκάει παντού
+    // 'Failed to fetch'"): το v2 fix πιο πάνω εμπόδιζε ΜΙΑ αποτυχία να
+    // μπλοκάρει όλο το batch, αλλά δεν εξηγεί ΓΙΑΤΙ ξαφνικά όλα τα υπόλοιπα
+    // αρχεία αποτυχαίνουν μετά τα πρώτα 5-8 - αυτό το μοτίβο (λίγα πετυχαίνουν,
+    // μετά ΟΛΑ αποτυχαίνουν, όχι τυχαία/σποραδικά) είναι το κλασικό "σημάδι"
+    // ότι το κινητό (κυρίως iOS Safari) έβαλε την καρτέλα σε background/ύπνο
+    // (κλείδωμα οθόνης, αλλαγή εφαρμογής, ή απλά inactivity timeout) ΚΑΙ το
+    // λειτουργικό "πάγωσε"/σκότωσε τα εναπομείναντα δικτυακά requests - ένα
+    // sequential loop με 97 αρχεία, ένα-ένα, μπορεί εύκολα να πάρει πολλά
+    // λεπτά, πολύ περισσότερο απ' όσο ένας καλεσμένος περιμένει να κρατήσει
+    // ανοιχτή/ξεκλείδωτη την οθόνη.
+    // Λύση σε 2 επίπεδα:
+    //   1) Ανεβάζουμε CONCURRENT_UPLOADS αρχεία ΤΑΥΤΟΧΡΟΝΑ (απλό "worker
+    //      pool") αντί ένα-ένα - μειώνει δραστικά τον ΣΥΝΟΛΙΚΟ χρόνο του
+    //      batch (π.χ. 97 αρχεία σε pool των 4 είναι περίπου στο 1/4 του
+    //      χρόνου), άρα λιγότερο "παράθυρο" για να κλειδώσει/κοιμηθεί η
+    //      συσκευή στη μέση.
+    //   2) Screen Wake Lock (βλ. πιο πάνω στην αρχή του confirmUpload) -
+    //      κρατάει την οθόνη ξύπνια όσο διαρκεί το upload, όπου
+    //      υποστηρίζεται (Safari 16.4+, Chrome/Android) - μειώνει ΑΚΟΜΑ
+    //      περισσότερο την πιθανότητα το λειτουργικό να "παγώσει" την
+    //      καρτέλα λόγω αδράνειας οθόνης. Δεν καλύπτει την περίπτωση ο
+    //      guest να αλλάξει ο ίδιος εφαρμογή/κλειδώσει χειροκίνητα, αλλά
+    //      καλύπτει το πολύ πιο συνηθισμένο σενάριο (auto-lock λόγω χρόνου).
+    let completedCount = 0;
+    const CONCURRENT_UPLOADS = Math.min(4, pendingFiles.length) || 1;
+
+    const uploadOneFile = async (i) => {
+      const file = pendingFiles[i];
+      try {
         const isVideo = isVideoFile(file);
         const safeName = file.name || (isVideo ? 'video.mp4' : 'photo.jpg');
         const fileName = `${currentEvent.id}/${Date.now()}_${safeName}`;
@@ -778,7 +822,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
           {
             onRetry: (attempt, max) => {
               setUploadProgress({
-                current: i + 1,
+                current: completedCount,
                 total: pendingFiles.length,
                 retry: { attempt, max }
               });
@@ -787,7 +831,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
         );
         // Το retry ολοκληρώθηκε (πέτυχε ή εξάντλησε τις προσπάθειες) -
         // καθαρίζουμε την ένδειξη "Επανασύνδεση..." από το progress.
-        setUploadProgress({ current: i + 1, total: pendingFiles.length });
+        setUploadProgress({ current: completedCount, total: pendingFiles.length });
 
         if (uploadError) throw uploadError;
 
@@ -887,7 +931,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
 
         saveMyPhotoToken(newPhoto.id, deleteToken);
         newUploadedPhotos.push(newPhoto);
-        successCount = i + 1;
+        successCount += 1;
 
         // ΘΕΤΙΚΟ log - βλ. σχόλιο στο logUploadEvent πιο πάνω στο αρχείο.
         logUploadEvent({
@@ -933,71 +977,104 @@ export function useEventPhotos(currentEvent, guestData, user) {
             })
             .catch((err) => console.error('Background faststart remux βίντεο απέτυχε:', err));
         }
+      } catch (fileErr) {
+        // ΔΙΟΡΘΩΣΗ v2 (βλ. εκτενές σχόλιο πριν το for loop): ΔΕΝ κάνουμε
+        // throw/break εδώ πλέον - καταγράφουμε το index που απέτυχε και
+        // προχωράμε κανονικά στο ΕΠΟΜΕΝΟ αρχείο του batch.
+        failedIndices.push(i);
+        if (!firstErr) firstErr = fileErr;
+        if (typeof fileErr?.message === 'string' && fileErr.message.startsWith('TIMEOUT:')) {
+          anyTimeout = true;
+        }
+        logUploadError({
+          eventId: currentEvent?.id,
+          errorType: (typeof fileErr?.message === 'string' && fileErr.message.startsWith('TIMEOUT:')) ? 'timeout' : 'other',
+          errorMessage: fileErr?.message || String(fileErr),
+          fileName: file?.name,
+          fileSizeBytes: file?.size,
+          isVideo: isVideoFile(file),
+          guestName: guestData?.name
+        });
+        console.error(fileErr);
+      } finally {
+        completedCount += 1;
+        // current = πόσα ΤΕΛΕΙΩΣΑΝ (πέτυχαν ή απέτυχαν οριστικά) - με
+        // CONCURRENT_UPLOADS αρχεία ταυτόχρονα δεν έχει νόημα πια το "i+1"
+        // (δεν ολοκληρώνονται με τη σειρά).
+        setUploadProgress({ current: completedCount, total: pendingFiles.length });
       }
+    };
 
-      // Dedup με το realtime subscription: το postgres_changes INSERT event
-      // (γραμμές 46-64) μπορεί να φτάσει μέσω websocket ΠΡΙΝ καν επιστρέψει
-      // αυτό το .insert().select() - η σειρά δεν είναι εγγυημένη. Χωρίς αυτόν
-      // τον έλεγχο, μια φωτογραφία που ήδη πρόσθεσε το realtime event θα
-      // ξαναμπεί εδώ από την αρχή, εμφανιζόμενη διπλή στο gallery.
+    // Απλό "worker pool": CONCURRENT_UPLOADS worker-concurrent βρόχοι
+    // τραβάνε τον επόμενο διαθέσιμο index από το κοινό nextIndex μέχρι να
+    // εξαντληθούν όλα τα αρχεία - έτσι έχουμε πάντα το πολύ CONCURRENT_UPLOADS
+    // ταυτόχρονα upload σε εξέλιξη, όχι 97 μαζεμένα αλλά ούτε ένα-ένα.
+    let nextIndex = 0;
+    const runWorker = async () => {
+      while (nextIndex < pendingFiles.length) {
+        const i = nextIndex;
+        nextIndex += 1;
+        await uploadOneFile(i);
+      }
+    };
+    await Promise.all(Array.from({ length: CONCURRENT_UPLOADS }, () => runWorker()));
+
+    // Δείχνουμε στο gallery ΟΛΑ όσα πρόλαβαν να ανέβουν με επιτυχία - είτε
+    // πέτυχε ολόκληρο το batch είτε όχι. Dedup με το realtime subscription:
+    // το postgres_changes INSERT event μπορεί να έχει φτάσει μέσω websocket
+    // ΠΡΙΝ καν επιστρέψει αυτό το .insert().select() - η σειρά δεν είναι
+    // εγγυημένη, οπότε φιλτράρουμε ό,τι έχει ήδη προστεθεί.
+    if (newUploadedPhotos.length > 0) {
       setPhotos(prev => {
         const existingIds = new Set(prev.map(p => p.id));
         const notYetAdded = newUploadedPhotos.filter(p => !existingIds.has(p.id));
         return [...notYetAdded, ...prev];
       });
-      cancelUpload();
-    } catch (err) {
-      // Ξεχωριστό, πιο κατατοπιστικό μήνυμα όταν έληξε το timeout (βλ.
-      // withTimeout πιο πάνω) - διαφορετικό λόγο αποτυχίας από ένα κανονικό
-      // network/server error, οπότε αξίζει διαφορετικό μήνυμα στον guest.
-      const isTimeout = typeof err?.message === 'string' && err.message.startsWith('TIMEOUT:');
-      const remaining = pendingFiles.length - successCount;
-      setError(
-        isTimeout
-          ? `Το ανέβασμα άργησε πολύ (πιθανώς αργή σύνδεση) και ακυρώθηκε. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} — ιδανικά με καλύτερο WiFi/σήμα.`
-          : `Σφάλμα κατά το ανέβασμα. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'}.`
-      );
-
-      // Αφαιρούμε ΜΟΝΟ τα ήδη επιτυχημένα αρχεία από το draft (pendingFiles/
-      // previewUrls) - βλ. εκτενές σχόλιο πιο πάνω στο successCount. Αυτά
-      // που απομένουν (το ίδιο το αρχείο που απέτυχε + όσα δεν προλάβαμε
-      // καν να δοκιμάσουμε) μένουν στο modal έτοιμα για retry με ένα απλό
-      // ξαναπάτημα του "Αποστολή", ΧΩΡΙΣ να ξαναπεράσουν τα ήδη πετυχημένα.
-      if (successCount > 0) {
-        setPreviewUrls(prev => {
-          prev.slice(0, successCount).forEach(url => URL.revokeObjectURL(url));
-          return prev.slice(successCount);
-        });
-        setPendingFiles(prev => prev.slice(successCount));
-      }
-
-      // Δείχνουμε αμέσως στο gallery ό,τι πρόλαβε να ανέβει με επιτυχία
-      // πριν σκάσει το σφάλμα - ίδιο dedup σκεπτικό με την επιτυχή περίπτωση
-      // παρακάτω (το realtime INSERT event μπορεί να έχει ήδη προσθέσει
-      // κάποια από αυτά).
-      if (newUploadedPhotos.length > 0) {
-        setPhotos(prev => {
-          const existingIds = new Set(prev.map(p => p.id));
-          const notYetAdded = newUploadedPhotos.filter(p => !existingIds.has(p.id));
-          return [...notYetAdded, ...prev];
-        });
-      }
-
-      logUploadError({
-        eventId: currentEvent?.id,
-        errorType: isTimeout ? 'timeout' : 'other',
-        errorMessage: err?.message || String(err),
-        fileName: currentFileForLog?.name,
-        fileSizeBytes: currentFileForLog?.size,
-        isVideo: currentFileForLog ? isVideoFile(currentFileForLog) : undefined,
-        guestName: guestData?.name
-      });
-      console.error(err);
-    } finally {
-      setUploading(false);
-      setUploadProgress({ current: 0, total: 0 });
-      confirmUploadInFlightRef.current = false;
     }
+
+    if (failedIndices.length === 0) {
+      // Όλα πέτυχαν - καθαρό batch, κλείνουμε κανονικά το draft.
+      cancelUpload();
+    } else {
+      // Μερική αποτυχία: κρατάμε στο pendingFiles/previewUrls ΜΟΝΟ τα
+      // αρχεία που πραγματικά απέτυχαν (με βάση τα index στο
+      // failedIndices) - ΟΧΙ ένα απλό "slice" όπως πριν, γιατί τώρα η
+      // αποτυχία δεν είναι υποχρεωτικά ένα συνεχόμενο "ουρά" (π.χ. το #11
+      // μπορεί να απέτυχε αλλά το #12 να πέτυχε κανονικά). Όσα πέτυχαν
+      // αφαιρούνται οριστικά (και τα preview blob URLs τους γίνονται
+      // revoke) - ένα retry θα ξαναπροσπαθήσει ΜΟΝΟ τα πραγματικά
+      // αποτυχημένα, ποτέ ξανά αυτά που ήδη ανέβηκαν.
+      const failedSet = new Set(failedIndices);
+      setPreviewUrls(prev => {
+        prev.forEach((url, idx) => {
+          if (!failedSet.has(idx)) URL.revokeObjectURL(url);
+        });
+        return prev.filter((_, idx) => failedSet.has(idx));
+      });
+      setPendingFiles(prev => prev.filter((_, idx) => failedSet.has(idx)));
+
+      const remaining = failedIndices.length;
+      setError(
+        anyTimeout
+          ? `Κάποια ανεβάσματα άργησαν πολύ (πιθανώς αργή σύνδεση) και ακυρώθηκαν. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}) — ιδανικά με καλύτερο WiFi/σήμα.`
+          : `Σφάλμα κατά το ανέβασμα κάποιων αρχείων. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}).`
+      );
+      console.error(firstErr);
+    }
+
+    // Απελευθέρωση του wake lock (βλ. σχόλιο στην αρχή) - πάντα, είτε
+    // πέτυχε είτε απέτυχε (μερικώς ή ολικά) το batch.
+    if (wakeLock) {
+      try {
+        await wakeLock.release();
+      } catch (releaseErr) {
+        // δεν πειράζει, δεν είναι κρίσιμο
+      }
+    }
+
+    setUploading(false);
+    setUploadProgress({ current: 0, total: 0 });
+    confirmUploadInFlightRef.current = false;
   };
 
   // Πραγματική, ρητή ακύρωση - πετάει το draft εντελώς (καλείται από το
