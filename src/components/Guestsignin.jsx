@@ -142,10 +142,26 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
     let cancelled = false;
     setCheckingName(true);
     const timer = setTimeout(async () => {
-      const taken = await checkGuestNameTaken({ eventId: event.id, name: trimmed });
-      if (!cancelled) {
-        setNameTaken(taken);
-        setCheckingName(false);
+      // ΔΙΟΡΘΩΣΗ (QA test σε πραγματικές συνθήκες δικτύου - Desktop Chrome
+      // "κόλλησε" μόνιμα στο κουμπί Join Party απενεργοποιημένο): αν το
+      // checkGuestNameTaken πετάξει exception (π.χ. πραγματικό network
+      // failure πριν καν απαντήσει ο server - το Supabase client ΔΕΝ το
+      // επιστρέφει πάντα ως {error}, μπορεί να κάνει throw), το setCheckingName(false)
+      // ΔΕΝ έτρεχε ποτέ -> το κουμπί έμενε disabled ΓΙΑ ΠΑΝΤΑ χωρίς κανένα
+      // μήνυμα στον guest. Τώρα, ό,τι και να γίνει, ανοίγουμε ξανά το
+      // κουμπί (fail-open - ίδια λογική με το ήδη υπάρχον fallback μέσα στο
+      // checkGuestNameTaken για το {error} περίπτωση).
+      let taken = false;
+      try {
+        taken = await checkGuestNameTaken({ eventId: event.id, name: trimmed });
+      } catch (err) {
+        console.log('checkGuestNameTaken threw', err?.message);
+        taken = false;
+      } finally {
+        if (!cancelled) {
+          setNameTaken(taken);
+          setCheckingName(false);
+        }
       }
     }, 450);
     return () => {
@@ -163,14 +179,7 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
   // αργό venue wifi) δεν μπλόκαρε το κουμπί - ο guest μπορούσε να πατήσει
   // Join Party ΜΕΣΑ στο παράθυρο των ~450ms+network πριν φανεί "το όνομα
   // υπάρχει ήδη" και να μπει στο event με όνομα που θα απορριφθεί μετά.
-  // Ο ίδιος άνθρωπος μπορεί να ξαναμπεί από ΑΛΛΗ συσκευή/browser (π.χ.
-  // άνοιξε το link από WhatsApp αντί για την κάμερα) - τότε το όνομά του
-  // φαίνεται "πιασμένο". Του δίνουμε ρητή επιλογή "Είμαι εγώ" αντί να
-  // κολλήσει έξω από το event.
-  const [confirmedSameName, setConfirmedSameName] = useState(false);
-  useEffect(() => { setConfirmedSameName(false); }, [guestName]);
-
-  const canContinue = !!guestName.trim() && (!nameTaken || confirmedSameName) && !hasProfanity && !checkingName;
+  const canContinue = !!guestName.trim() && !nameTaken && !hasProfanity && !checkingName;
 
   // Ίδιο pattern με το FloatingAddMenu (uploading -> opacity 0.6 στο ίδιο
   // κουμπί) αντί για ξεχωριστό γκρι/λευκό "disabled" χρώμα - το κουμπί
@@ -281,19 +290,10 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
           <p style={styles.nameWarning}>
             {t('guestSignIn.profanityWarning')}
           </p>
-        ) : nameTaken && !confirmedSameName ? (
-          <>
-            <p style={styles.nameWarning}>
-              {t('guestSignIn.nameTakenWarning')}
-            </p>
-            <button
-              type="button"
-              onClick={() => setConfirmedSameName(true)}
-              style={{ background: 'none', border: 'none', color: 'inherit', textDecoration: 'underline', opacity: 0.85, fontSize: '13px', cursor: 'pointer', padding: '6px 0', fontFamily: 'inherit' }}
-            >
-              {t('guestSignIn.itsMe')}
-            </button>
-          </>
+        ) : nameTaken ? (
+          <p style={styles.nameWarning}>
+            {t('guestSignIn.nameTakenWarning')}
+          </p>
         ) : (
           <p style={styles.nameFootnote}>{t('guestSignIn.footnote')}</p>
         )}
