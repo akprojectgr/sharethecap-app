@@ -142,18 +142,30 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
     let cancelled = false;
     setCheckingName(true);
     const timer = setTimeout(async () => {
-      // ΔΙΟΡΘΩΣΗ (QA test σε πραγματικές συνθήκες δικτύου - Desktop Chrome
-      // "κόλλησε" μόνιμα στο κουμπί Join Party απενεργοποιημένο): αν το
-      // checkGuestNameTaken πετάξει exception (π.χ. πραγματικό network
-      // failure πριν καν απαντήσει ο server - το Supabase client ΔΕΝ το
-      // επιστρέφει πάντα ως {error}, μπορεί να κάνει throw), το setCheckingName(false)
-      // ΔΕΝ έτρεχε ποτέ -> το κουμπί έμενε disabled ΓΙΑ ΠΑΝΤΑ χωρίς κανένα
-      // μήνυμα στον guest. Τώρα, ό,τι και να γίνει, ανοίγουμε ξανά το
-      // κουμπί (fail-open - ίδια λογική με το ήδη υπάρχον fallback μέσα στο
-      // checkGuestNameTaken για το {error} περίπτωση).
+      // ΔΙΟΡΘΩΣΗ (QA test σε πραγματικές συνθήκες δικτύου - κόλλησε μόνιμα
+      // το κουμπί Join Party απενεργοποιημένο, σε τυχαία διαφορετική
+      // συσκευή κάθε φορά): δεν αρκεί το try/catch - αν το αίτημα απλά
+      // ΚΡΕΜΑΣΕΙ (δεν απαντάει καθόλου, ούτε πετυχαίνει ούτε πετάει σφάλμα
+      // - π.χ. πρόσκαιρο πρόβλημα δικτύου/server χωρίς το Supabase client
+      // να το προλάβει), το catch δεν τρέχει ποτέ και το setCheckingName(false)
+      // δεν γίνεται - το κουμπί έμενε disabled ΓΙΑ ΠΑΝΤΑ χωρίς κανένα
+      // μήνυμα στον guest. Προσθέτουμε ρητό όριο 5 δευτ.: ό,τι και να
+      // γίνει, ανοίγουμε ξανά το κουμπί (fail-open - ίδια λογική με το ήδη
+      // υπάρχον fallback μέσα στο checkGuestNameTaken για το {error}
+      // περίπτωση) - ο guest δεν περιμένει ποτέ πάνω από 5 δευτ.
       let taken = false;
       try {
-        taken = await checkGuestNameTaken({ eventId: event.id, name: trimmed });
+        const TIMEOUT = Symbol('timeout');
+        const result = await Promise.race([
+          checkGuestNameTaken({ eventId: event.id, name: trimmed }),
+          new Promise((resolve) => setTimeout(() => resolve(TIMEOUT), 5000))
+        ]);
+        if (result === TIMEOUT) {
+          console.log('checkGuestNameTaken timeout (>5s) - προχωράμε κανονικά');
+          taken = false;
+        } else {
+          taken = result;
+        }
       } catch (err) {
         console.log('checkGuestNameTaken threw', err?.message);
         taken = false;
