@@ -530,6 +530,16 @@ export function useEventPhotos(currentEvent, guestData, user) {
         });
         newestCreatedAtRef.current = data[0].created_at;
       }
+      // ΔΙΟΡΘΩΣΗ (ίδιο θέμα με το totalPhotoCount πιο πάνω): αν η καρτέλα
+      // ήταν στο background αρκετή ώρα και το websocket του real-time
+      // κόπηκε (βλ. σχόλιο στο handleVisibilityChange), μπορεί να έχουν
+      // προστεθεί νέες φωτο από ΑΛΛΟΥΣ guests που ΔΕΝ έφτασαν ποτέ μέσω
+      // postgres_changes INSERT - άρα ούτε το totalPhotoCount θα είχε
+      // ενημερωθεί γι' αυτές. Αντί να προσπαθούμε να μαντέψουμε πόσες ήταν,
+      // ξαναζητάμε απλά το πραγματικό σύνολο απευθείας (ίδιο ελαφρύ COUNT
+      // query) κάθε φορά που η καρτέλα ξαναγίνεται ενεργή - έτσι ο μετρητής
+      // "συγχρονίζεται" ξανά ακόμα κι αν χάθηκε κάποιο real-time event.
+      loadTotalCount();
     };
 
     loadPhotos();
@@ -1226,9 +1236,27 @@ export function useEventPhotos(currentEvent, guestData, user) {
     // ΠΡΙΝ καν επιστρέψει αυτό το .insert().select() - η σειρά δεν είναι
     // εγγυημένη, οπότε φιλτράρουμε ό,τι έχει ήδη προστεθεί.
     if (newUploadedPhotos.length > 0) {
+      // ΔΙΟΡΘΩΣΗ ("έπρεπε να κάνω refresh για να δω 780 -> 781, ούτε είχε
+      // κανένα effect"): όταν ανεβάζει ο ΙΔΙΟΣ guest, οι νέες φωτο μπαίνουν
+      // ΕΔΩ απευθείας στο photos state (άμεσο feedback, χωρίς να περιμένει
+      // το real-time event να γυρίσει μέσω websocket) - αλλά το
+      // totalPhotoCount ενημερωνόταν ΜΟΝΟ μέσα στο postgres_changes INSERT
+      // listener παραπάνω. Αποτέλεσμα: ο μετρητής στο hero ΔΕΝ προχωρούσε
+      // καθόλου όταν ανέβαζες εσύ ο ίδιος (μόνο όταν έφτανε νέα φωτο από
+      // ΑΛΛΟΝ guest μέσω real-time) - έμενε "κολλημένος" μέχρι χειροκίνητο
+      // refresh (που ξανακάνει το αρχικό COUNT query από την αρχή).
+      // Μετράμε εδώ πόσες από τις νέες φωτο ΔΕΝ είναι ήδη μέσα στο
+      // photosRef (δηλαδή δεν έχουν ήδη μετρηθεί από το real-time listener -
+      // dedup προς αποφυγή διπλής μέτρησης αν φτάσουν και τα δύο) και
+      // αυξάνουμε το totalPhotoCount αντίστοιχα.
+      const existingIds = new Set(photosRef.current.map(p => p.id));
+      const newlyCountedPhotos = newUploadedPhotos.filter(p => !existingIds.has(p.id));
+      if (newlyCountedPhotos.length > 0) {
+        setTotalPhotoCount(count => count + newlyCountedPhotos.length);
+      }
       setPhotos(prev => {
-        const existingIds = new Set(prev.map(p => p.id));
-        const notYetAdded = newUploadedPhotos.filter(p => !existingIds.has(p.id));
+        const existingIdsInner = new Set(prev.map(p => p.id));
+        const notYetAdded = newUploadedPhotos.filter(p => !existingIdsInner.has(p.id));
         return [...notYetAdded, ...prev];
       });
     }
