@@ -25,6 +25,85 @@ import { acquireUploadBusy, releaseUploadBusy } from './uploadBusy';
 // γενικό safety cap.
 const MAX_VIDEO_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB (ταιριάζει με το bucket limit στο Supabase - ανέβηκε από 500MB->1GB)
 
+// ΔΙΟΡΘΩΣΗ ("βίντεο από τη συλλογή χωρίς κανένα όριο διάρκειας"): το
+// in-app VideoRecorder.jsx έχει δικό του, πιο αυστηρό όριο ΕΓΓΡΑΦΗΣ
+// (MAX_RECORD_SECONDS = 90 εκεί - λογικό για μια γρήγορη "ζωντανή" λήψη
+// μέσα στην εφαρμογή), αλλά ένα βίντεο που ο guest επιλέγει ΕΤΟΙΜΟ από τη
+// συλλογή του κινητού του περνούσε ΜΟΝΟ από τον έλεγχο ΜΕΓΕΘΟΥΣ
+// (MAX_VIDEO_SIZE_BYTES πιο πάνω) - τεχνικά μπορεί να είναι κάτω από το
+// όριο του 1GB αλλά να παίρνει πολλή ώρα να ανέβει σε αδύναμο δίκτυο venue.
+//
+// ΔΙΟΡΘΩΣΗ 2 ("90 δευτ. είναι πολύ αυστηρό - ένα βίντεο χορού/ομιλίας
+// 1-3 λεπτών είναι απόλυτα φυσιολογικό να θέλει να μοιραστεί ένας
+// καλεσμένος γάμου"): το αρχικό 90άρι (ίδιο με τον in-app recorder) ήταν
+// υπερβολικά αυστηρό για ΗΔΗ τραβηγμένα βίντεο - ένας guest με ένα κλιπ
+// 2 λεπτών από τον πρώτο χορό ή μια ομιλία θα απορριπτόταν άδικα, χωρίς
+// εύκολο τρόπο να το "κόψει" τη στιγμή της δεξίωσης. Ανεβάζουμε το όριο σε
+// 5 λεπτά (300 δευτ.) - καλύπτει άνετα σχεδόν κάθε λογικό "στιγμιότυπο
+// γάμου" (χορό, ομιλία, πρόποση), κρατώντας προστασία ΜΟΝΟ για πραγματικά
+// υπερβολικά αρχεία (π.χ. ολόκληρη βιντεοσκόπηση 15-20 λεπτών που κάποιος
+// επιλέξει κατά λάθος) - αυτά είναι σπάνια αλλά όντως προβληματικά σε
+// αδύναμο δίκτυο venue.
+const MAX_VIDEO_DURATION_SECONDS = 5 * 60; // 300 δευτ. = 5 λεπτά
+
+// Διαβάζει τη διάρκεια ενός video File ΠΡΙΝ ξεκινήσει οποιοδήποτε upload -
+// δημιουργεί ένα αόρατο <video> element (ποτέ δεν μπαίνει στο DOM/δεν
+// φαίνεται πουθενά), περιμένει το native 'loadedmetadata' event (ο browser
+// διαβάζει ΜΟΝΟ τα πρώτα bytes/header του αρχείου τοπικά - καμία σύνδεση
+// δικτύου, καμία πραγματική αναπαραγωγή) και επιστρέφει τη διάρκεια σε
+// δευτερόλεπτα. Επιστρέφει null (ΠΟΤΕ δεν πετάει σφάλμα) αν κάτι πάει
+// στραβά ή αν ο browser δεν μπορεί να προσδιορίσει αξιόπιστα τη διάρκεια
+// (π.χ. γνωστό πρόβλημα με "Infinity" duration σε ορισμένα WebM αρχεία
+// χωρίς σωστό header, ή αν περάσουν 8 δευτ. χωρίς απάντηση) - σε αυτή την
+// περίπτωση ΔΕΝ μπλοκάρουμε το upload: καλύτερα να περάσει ένα βίντεο που
+// δεν μπορέσαμε να μετρήσουμε, παρά να μπλοκάρουμε λανθασμένα ένα έγκυρο,
+// σύντομο βίντεο επειδή ο browser/συσκευή δεν συνεργάστηκε.
+// Μορφοποιεί δευτερόλεπτα σε φιλικό κείμενο για μηνύματα λάθους προς τον
+// guest - "5 λεπτά" αντί για το λιγότερο κατανοητό "300 δευτ.".
+function formatDurationForHuman(totalSeconds) {
+  const rounded = Math.round(totalSeconds);
+  if (rounded < 60) return `${rounded} δευτ.`;
+  const minutes = Math.floor(rounded / 60);
+  const seconds = rounded % 60;
+  if (seconds === 0) return `${minutes} λεπτ${minutes === 1 ? 'ό' : 'ά'}`;
+  return `${minutes} λεπτ${minutes === 1 ? 'ό' : 'ά'} ${seconds} δευτ.`;
+}
+
+function getVideoDurationSeconds(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const videoEl = document.createElement('video');
+    videoEl.preload = 'metadata';
+    videoEl.muted = true;
+    let settled = false;
+
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    };
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(safetyTimer);
+      cleanup();
+      resolve(value);
+    };
+
+    videoEl.onloadedmetadata = () => {
+      const duration = videoEl.duration;
+      finish(Number.isFinite(duration) ? duration : null);
+    };
+    videoEl.onerror = () => finish(null);
+    // Safety net - μην αφήσεις ΠΟΤΕ τον guest να περιμένει επ' αόριστον αν
+    // το metadata δεν φορτώσει ποτέ για κάποιο λόγο (π.χ. περίεργο codec).
+    const safetyTimer = setTimeout(() => finish(null), 8000);
+
+    videoEl.src = url;
+  });
+}
+
 // ΔΙΟΡΘΩΣΗ (design review - "όταν ανοίγω ένα βίντεο δεν θέλω να περιμένει ο
 // χρήστης να φορτώσει, να ανοίγει κατευθείαν αμέσα" + "δεν θέλω να πληρώνω"):
 // το πραγματικό πρόβλημα με τα μεγάλα βίντεο που "κολλάνε" στο lightbox ΔΕΝ
@@ -201,7 +280,7 @@ function sleep(ms) {
 // Χρησιμοποιείται ΜΟΝΟ για βίντεο (οι φωτογραφίες είναι ήδη αρκετά μικρές
 // ώστε να ανεβαίνουν αξιόπιστα με το απλό upload - καμία αποτυχία
 // φωτογραφίας στα πραγματικά logs του test).
-function tusUploadVideo(file, fileName, { onProgress } = {}) {
+function tusUploadVideo(file, fileName, { onProgress, onUploadCreated } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const upload = new tus.Upload(file, {
@@ -255,6 +334,18 @@ function tusUploadVideo(file, fileName, { onProgress } = {}) {
         resolve({ path: fileName });
       }
     });
+
+    // ΔΙΟΡΘΩΣΗ ("το εγκαταλειμμένο TUS upload συνέχιζε στο παρασκήνιο μετά
+    // το timeout"): εκθέτουμε το upload instance στον caller (uploadOneFile)
+    // ΠΡΙΝ καν ξεκινήσει, ώστε αν το withTimeout λήξει πρώτο (ή αν ο caller
+    // αποφασίσει να προχωρήσει στο plain-upload fallback για οποιονδήποτε
+    // άλλο λόγο), να μπορεί να καλέσει upload.abort() και να σταματήσει
+    // ΠΡΑΓΜΑΤΙΚΑ το chunked upload - αλλιώς αυτό το Promise απλά "εγκαταλείπεται"
+    // (δεν το περιμένει πια κανείς) αλλά το tus-js-client συνεχίζει κανονικά
+    // να στέλνει chunks στο παρασκήνιο: σπαταλάει δεδομένα/μπαταρία του guest
+    // ΚΑΙ μπορεί να γράψει (ή να ξαναγράψει ένα chunk) στο ΙΔΙΟ storage path
+    // που χρησιμοποιεί ταυτόχρονα το fallback plain upload παρακάτω.
+    if (onUploadCreated) onUploadCreated(upload);
 
     // Αν υπάρχει ΗΔΗ μια ημιτελής προσπάθεια γι' αυτό ΑΚΡΙΒΩΣ το αρχείο
     // (π.χ. ο guest ξανακλείδωσε/ξανάνοιξε την καρτέλα στη μέση), το
@@ -465,6 +556,18 @@ export function useEventPhotos(currentEvent, guestData, user) {
   useEffect(() => {
     if (!currentEvent) return;
 
+    // ΔΙΟΡΘΩΣΗ (race condition σε γρήγορη εναλλαγή event): αν ο χρήστης
+    // αλλάξει event (π.χ. host βλέπει πολλά events, ή κάποιο navigation
+    // ξαναρχίσει το component με νέο currentEvent) ΠΡΙΝ προλάβει να
+    // απαντήσει το loadPhotos()/loadTotalCount() του ΠΡΟΗΓΟΥΜΕΝΟΥ event, η
+    // απάντηση αυτή μπορεί να φτάσει ΑΡΓΟΤΕΡΑ και να αντικαταστήσει σιωπηλά
+    // το ήδη φορτωμένο gallery του ΝΕΟΥ event με δεδομένα του παλιού -
+    // ιδιαίτερα πιθανό σε αργό δίκτυο, που είναι ακριβώς το σενάριο αυτής
+    // της εφαρμογής. Το "cancelled" flag εδώ μπλοκάρει οποιοδήποτε setState
+    // από μια απάντηση που αφορά πλέον ΠΑΛΙΟ effect run (καθαρίζεται στο
+    // cleanup παρακάτω, όταν το effect ξανατρέχει ή το component unmount-άρει).
+    let cancelled = false;
+
     // Reset κατάστασης pagination σε κάθε αλλαγή event - αλλιώς ένα
     // "hasMorePhotos: true" από το ΠΡΟΗΓΟΥΜΕΝΟ event θα έμενε κολλημένο.
     setHasMorePhotos(false);
@@ -481,6 +584,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
         .order('created_at', { ascending: false })
         .limit(PAGE_SIZE);
 
+      if (cancelled) return;
       if (!error && data) {
         setPhotos(data);
         setHasMorePhotos(data.length === PAGE_SIZE);
@@ -497,6 +601,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
         .from('photos')
         .select('*', { count: 'exact', head: true })
         .eq('event_id', currentEvent.id);
+      if (cancelled) return;
       if (!error && typeof count === 'number') {
         setTotalPhotoCount(count);
       }
@@ -522,6 +627,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
         : query.limit(PAGE_SIZE);
 
       const { data, error } = await query;
+      if (cancelled) return;
       if (!error && data && data.length > 0) {
         setPhotos(prev => {
           const existingIds = new Set(prev.map(p => p.id));
@@ -662,6 +768,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
     window.addEventListener('focus', handleVisibilityChange);
 
     return () => {
+      cancelled = true;
       supabase.removeChannel(channel);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
@@ -722,6 +829,31 @@ export function useEventPhotos(currentEvent, guestData, user) {
             guestName: guestData?.name
           });
           continue;
+        }
+
+        // ΔΙΟΡΘΩΣΗ (βλ. σχόλιο στο MAX_VIDEO_DURATION_SECONDS πιο πάνω στο
+        // αρχείο): έλεγχος ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - εφαρμόζεται ΜΟΝΟ σε
+        // βίντεο επιλεγμένα από τη συλλογή (το in-app recorder έχει ήδη δικό
+        // του όριο εγγραφής, βλ. VideoRecorder.jsx). Τρέχει ΠΡΙΝ από το HEIC
+        // conversion/preview παρακάτω ώστε να μην "σπαταλάμε" δουλειά σε ένα
+        // αρχείο που θα απορριφθεί ούτως ή άλλως.
+        if (isVideo) {
+          const durationSeconds = await getVideoDurationSeconds(rawFile);
+          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+            setError(
+              `Το βίντεο "${rawFile.name}" είναι πολύ μεγάλο σε διάρκεια (${formatDurationForHuman(durationSeconds)}, μέγιστο ${formatDurationForHuman(MAX_VIDEO_DURATION_SECONDS)}). Κόψε το σε μικρότερο κομμάτι και ξαναδοκίμασε.`
+            );
+            logUploadError({
+              eventId: currentEvent?.id,
+              errorType: 'duration_limit',
+              errorMessage: `Βίντεο ${Math.round(durationSeconds)}s > όριο ${MAX_VIDEO_DURATION_SECONDS}s`,
+              fileName: rawFile.name,
+              fileSizeBytes: rawFile.size,
+              isVideo: true,
+              guestName: guestData?.name
+            });
+            continue;
+          }
         }
 
         let file = rawFile;
@@ -801,6 +933,31 @@ export function useEventPhotos(currentEvent, guestData, user) {
             guestName: guestData?.name
           });
           continue;
+        }
+
+        // ΔΙΟΡΘΩΣΗ (βλ. σχόλιο στο MAX_VIDEO_DURATION_SECONDS πιο πάνω στο
+        // αρχείο): έλεγχος ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - εφαρμόζεται ΜΟΝΟ σε
+        // βίντεο επιλεγμένα από τη συλλογή (το in-app recorder έχει ήδη δικό
+        // του όριο εγγραφής, βλ. VideoRecorder.jsx). Τρέχει ΠΡΙΝ από το HEIC
+        // conversion/preview παρακάτω ώστε να μην "σπαταλάμε" δουλειά σε ένα
+        // αρχείο που θα απορριφθεί ούτως ή άλλως.
+        if (isVideo) {
+          const durationSeconds = await getVideoDurationSeconds(rawFile);
+          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+            setError(
+              `Το βίντεο "${rawFile.name}" είναι πολύ μεγάλο σε διάρκεια (${formatDurationForHuman(durationSeconds)}, μέγιστο ${formatDurationForHuman(MAX_VIDEO_DURATION_SECONDS)}). Κόψε το σε μικρότερο κομμάτι και ξαναδοκίμασε.`
+            );
+            logUploadError({
+              eventId: currentEvent?.id,
+              errorType: 'duration_limit',
+              errorMessage: `Βίντεο ${Math.round(durationSeconds)}s > όριο ${MAX_VIDEO_DURATION_SECONDS}s`,
+              fileName: rawFile.name,
+              fileSizeBytes: rawFile.size,
+              isVideo: true,
+              guestName: guestData?.name
+            });
+            continue;
+          }
         }
 
         let file = rawFile;
@@ -961,6 +1118,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
           // (ίδιο με των φωτογραφιών) αντί να παραδεχτούμε αποτυχία αμέσως -
           // έτσι ΔΕΝ χειροτερεύουμε ποτέ σε σχέση με πριν, μόνο βελτιωνόμαστε
           // όπου το TUS δουλεύει.
+          let activeTusUpload = null;
           try {
             uploadData = await withTimeout(
               tusUploadVideo(file, fileName, {
@@ -971,6 +1129,9 @@ export function useEventPhotos(currentEvent, guestData, user) {
                     total: pendingFiles.length,
                     videoProgress: pct
                   });
+                },
+                onUploadCreated: (upload) => {
+                  activeTusUpload = upload;
                 }
               }),
               UPLOAD_TIMEOUT_MS_VIDEO,
@@ -978,6 +1139,24 @@ export function useEventPhotos(currentEvent, guestData, user) {
             );
           } catch (tusErr) {
             console.warn('TUS resumable upload βίντεο απέτυχε - fallback σε απλό upload:', tusErr);
+            // ΔΙΟΡΘΩΣΗ ("εγκαταλειμμένο TUS upload συνέχιζε στο παρασκήνιο"):
+            // είτε έληξε το withTimeout (10 λεπτά) είτε το ίδιο το TUS
+            // παραδέχτηκε αποτυχία (onError) - και στις δύο περιπτώσεις
+            // ΣΤΑΜΑΤΑΜΕ ρητά το chunked upload πριν ξεκινήσουμε το fallback,
+            // ώστε να μη συνεχίζει να «τρώει» δεδομένα/μπαταρία του guest στο
+            // παρασκήνιο ούτε να κινδυνεύει να γράψει πάνω στο ΙΔΙΟ storage
+            // path που θα χρησιμοποιήσει αμέσως το fallback. Το abort(true)
+            // ζητάει επιπλέον από το Supabase να διαγράψει το όποιο ημιτελές
+            // partial upload είχε ήδη γίνει - best effort, δεν μπλοκάρουμε
+            // το fallback περιμένοντας το αποτέλεσμά του.
+            if (activeTusUpload) {
+              try {
+                activeTusUpload.abort(true)?.catch(() => {});
+              } catch (_abortErr) {
+                // Αγνοείται σκόπιμα - το abort είναι best effort καθαρισμός,
+                // ποτέ δεν πρέπει να εμποδίσει το fallback upload.
+              }
+            }
             const { data: fallbackData, error: fallbackError } = await withNetworkRetry(
               () =>
                 withTimeout(
@@ -1283,10 +1462,14 @@ export function useEventPhotos(currentEvent, guestData, user) {
       setPendingFiles(prev => prev.filter((_, idx) => failedSet.has(idx)));
 
       const remaining = failedIndices.length;
+      // ΔΙΟΡΘΩΣΗ (feedback χρήστη - "ανεβάσματα δεν υπάρχει καν σαν λέξη"):
+      // το "ανεβάσματα" ήταν αδόκιμη/τεχνητή λέξη (sounded AI-generated).
+      // Πιο φυσική διατύπωση: "Κάποια αρχεία..." αντί για "Κάποια
+      // ανεβάσματα...".
       setError(
         anyTimeout
-          ? `Κάποια ανεβάσματα άργησαν πολύ (πιθανώς αργή σύνδεση) και ακυρώθηκαν. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}) — ιδανικά με καλύτερο WiFi/σήμα.`
-          : `Σφάλμα κατά το ανέβασμα κάποιων αρχείων. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}).`
+          ? `Κάποια αρχεία άργησαν πολύ να ανέβουν (πιθανώς αργή σύνδεση) και σταμάτησαν. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}).`
+          : `Κάποια αρχεία δεν ανέβηκαν. ${successCount > 0 ? `${successCount} ανέβηκαν κανονικά. ` : ''}Δοκίμασε ξανά για τ${remaining === 1 ? 'ο υπόλοιπο' : 'α υπόλοιπα'} (${remaining}).`
       );
       console.error(firstErr);
     }

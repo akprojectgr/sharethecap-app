@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { supabase } from '../lib/supabaseClient';
+import { friendlyErrorMessage } from '../lib/friendlyError';
 
 // Ρυθμίσεις λογαριασμού - ανοίγει από το γρανάζι στο MyEvents.jsx. Δείχνει:
 //  - Φωτογραφία προφίλ (profiles.avatar_url) - upload νέας, bucket "avatars".
@@ -141,7 +142,7 @@ export default function AccountSettings({ onClose, onLogout }) {
       setNameStatus('idle');
       setSuccess('Το όνομα αποθηκεύτηκε.');
     } catch (err) {
-      setError(err.message || 'Δεν αποθηκεύτηκε το όνομα.');
+      setError(friendlyErrorMessage(err, 'Δεν αποθηκεύτηκε το όνομα.'));
     } finally {
       setSavingName(false);
     }
@@ -174,7 +175,7 @@ export default function AccountSettings({ onClose, onLogout }) {
       setAvatarUrl(newUrl);
       setSuccess('Η φωτογραφία προφίλ ενημερώθηκε.');
     } catch (err) {
-      setError(err.message || 'Δεν ανέβηκε η φωτογραφία. Δοκίμασε ξανά.');
+      setError(friendlyErrorMessage(err, 'Δεν ανέβηκε η φωτογραφία. Δοκίμασε ξανά.'));
     } finally {
       setUploadingAvatar(false);
     }

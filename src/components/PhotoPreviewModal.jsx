@@ -9,6 +9,16 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
   // ίδιο το URL που δείχνουμε παραμένει πάντα το previewUrls[index].
   const isVideoAt = (index) => !!(pendingFiles && pendingFiles[index] && isVideoFile(pendingFiles[index]));
 
+  // ΔΙΟΡΘΩΣΗ ("ο guest δεν ξέρει το όριο διάρκειας βίντεο παρά μόνο ΑΦΟΥ
+  // απορριφθεί"): επαγγελματικό UX είναι ο περιορισμός να φαίνεται ΠΡΟΛΗΠΤΙΚΑ
+  // (εδώ, πριν καν πατήσει "Αποστολή") ΚΑΙ όχι μόνο αντιδραστικά μέσω του
+  // μηνύματος σφάλματος (useEventPhotos.js) αν τον παραβεί - έτσι δεν
+  // εκπλήσσεται άσχημα. Δείχνουμε την υπενθύμιση ΜΟΝΟ όταν υπάρχει
+  // πράγματι τουλάχιστον ένα βίντεο στο batch (όχι άσχετη σε ένα batch μόνο
+  // με φωτογραφίες). Το ίδιο όριο (5 λεπτά) με το MAX_VIDEO_DURATION_SECONDS
+  // στο useEventPhotos.js - αν αλλάξει εκεί, άλλαξέ το και εδώ.
+  const hasVideo = !!(pendingFiles && pendingFiles.some((f) => isVideoFile(f)));
+
   const allCategories = event?.categories || [];
   const hiddenCategories = event?.hidden_categories || [];
   const availableCategories = allCategories.filter((cat) => !hiddenCategories.includes(cat));
@@ -125,7 +135,10 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
           <div style={styles.headerRow}>
             <div>
               <p style={styles.title}>Νέες φωτογραφίες ({previewUrls.length})</p>
-              <p style={styles.subtitle}>Πάτησε μια φωτογραφία για προβολή</p>
+              <p style={styles.subtitle}>
+                Πάτησε μια φωτογραφία για προβολή
+                {hasVideo ? ' · Βίντεο έως 5 λεπτά' : ''}
+              </p>
             </div>
             <button
               type="button"

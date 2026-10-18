@@ -197,6 +197,62 @@ export default function KlevApp() {
     return () => clearTimeout(timer);
   }, [error, uploadError, setError, setUploadError]);
 
+  // ΠΡΟΣΤΑΣΙΑ "πίσω" ΟΣΟ γίνεται upload ή υπάρχει ανεπιβεβαίωτο draft
+  // φωτογραφιών (feature request - "αν πατήσει κάποιος κατά λάθος πίσω στον
+  // browser ενώ ανεβάζει, να παραμένει εκεί"): σε κινητό, ένα ακούσιο tap
+  // στο gesture "πίσω" (swipe από την άκρη σε Android, back button) μπορεί
+  // να βγάλει τον guest ΕΝΤΕΛΩΣ έξω από την εφαρμογή (π.χ. πίσω στο
+  // messenger/SMS από όπου άνοιξε το link) ενώ ανεβαίνει ένα βαρύ βίντεο -
+  // χάνοντας το upload ΚΑΙ το draft χωρίς καμία προειδοποίηση.
+  //
+  // Λύση (κλασικό pattern): όσο υπάρχει ενεργό upload ή pendingFiles,
+  // μπαίνει μια επιπλέον, "αόρατη" εγγραφή στο browser history (ένα
+  // history.pushState χωρίς αλλαγή URL). Το ΠΡΩΤΟ "πίσω" του guest δεν
+  // βγάζει πλέον έξω από την εφαρμογή - ενεργοποιεί το δικό μας popstate
+  // listener, που αν δει ότι υπάρχει ακόμα ενεργό upload/draft, ΞΑΝΑΜΠΑΖΕΙ
+  // αμέσως την ίδια "ασπίδα" (άρα ο guest παραμένει στην ίδια οθόνη) και
+  // δείχνει ένα σαφές μήνυμα γιατί δεν προχώρησε. Μόλις το upload
+  // ολοκληρωθεί/ακυρωθεί (uploading=false ΚΑΙ pendingFiles=0), η ασπίδα
+  // "αδειάζει" - το επόμενο "πίσω" δουλεύει κανονικά, όπως θα περίμενε ο
+  // guest. Επιπλέον beforeunload για το σκληρό κλείσιμο/refresh καρτέλας
+  // (διαφορετικό API, διαφορετικό σενάριο - ο browser δείχνει το δικό του
+  // έτοιμο "είσαι σίγουρος;" dialog, δεν μπορούμε να το αντικαταστήσουμε με
+  // δικό μας κείμενο σε κανέναν σύγχρονο browser, αλλά η εμφάνισή του αρκεί).
+  const hasActiveUploadOrDraft = uploading || pendingFiles.length > 0;
+  const uploadGuardActiveRef = useRef(false);
+  const uploadGuardPushedRef = useRef(false);
+  useEffect(() => {
+    uploadGuardActiveRef.current = hasActiveUploadOrDraft;
+    if (hasActiveUploadOrDraft && !uploadGuardPushedRef.current) {
+      window.history.pushState({ klevUploadGuard: true }, '');
+      uploadGuardPushedRef.current = true;
+    } else if (!hasActiveUploadOrDraft) {
+      uploadGuardPushedRef.current = false;
+    }
+  }, [hasActiveUploadOrDraft]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (uploadGuardActiveRef.current) {
+        window.history.pushState({ klevUploadGuard: true }, '');
+        setUploadError('Η μεταφόρτωση είναι σε εξέλιξη - παρέμεινε λίγο ακόμα μέχρι να ολοκληρωθεί.');
+      }
+    };
+    const handleBeforeUnload = (e) => {
+      if (!uploadGuardActiveRef.current) return;
+      e.preventDefault();
+      // Παλιό API requirement κάποιων browsers - αγνοείται πλέον το
+      // περιεχόμενο του string, αλλά η ίδια η ανάθεση χρειάζεται να υπάρχει.
+      e.returnValue = '';
+    };
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [setUploadError]);
+
   if (checkingUrlCode) {
     return (
       <AppShell bg={eventBg}>
