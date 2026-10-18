@@ -210,6 +210,24 @@ function tusUploadVideo(file, fileName, { onProgress } = {}) {
       // ειδικά σχεδιασμένο για resumable uploads (ξαναδοκιμάζει ΜΟΝΟ το
       // σημείο που κόπηκε, όχι απ' την αρχή).
       retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
+      // ΔΙΟΡΘΩΣΗ v5 ("ακόμα και ΜΙΚΡΑ βίντεο (858KB) αποτυγχάνουν αμέσως με
+      // 'Failed to fetch' μέσω TUS, ενώ οι φωτογραφίες [απλό POST upload]
+      // ΠΕΡΝΑΝΕ κανονικά στο ΙΔΙΟ δίκτυο/συσκευή" - επιβεβαιώθηκε ότι το TUS
+      // fix ήταν ήδη live όταν συνέβη αυτό): το πρωτόκολλο TUS χρησιμοποιεί
+      // HTTP method PATCH για να στείλει κάθε chunk μετά το αρχικό POST.
+      // Πολλά mobile carrier δίκτυα (ειδικά σε prepaid/budget data plans σε
+      // ορισμένες περιοχές) έχουν transparent proxies που μπλοκάρουν ή
+      // "σπάνε" λιγότερο συνηθισμένα HTTP methods σαν το PATCH, ενώ αφήνουν
+      // κανονικά GET/POST να περάσουν απρόσκοπτα - αυτό εξηγεί γιατί η
+      // αποτυχία ήταν ΑΜΕΣΗ και ΑΝΕΞΑΡΤΗΤΗ από το μέγεθος του βίντεο (ακόμα
+      // και ένα μοναδικό chunk των 858KB δεν ολοκληρωνόταν ΠΟΤΕ, ενώ τα
+      // POST-based photo uploads δούλευαν μια χαρά στο ΙΔΙΟ δίκτυο/κινητό).
+      // Το overridePatchMethod είναι ακριβώς το επίσημο workaround του
+      // tus-js-client γι' αυτό το σενάριο: στέλνει το chunk σαν ΚΑΝΟΝΙΚΟ POST
+      // με ένα header "X-HTTP-Method-Override: PATCH" αντί για πραγματικό
+      // PATCH request - ο server (Supabase/tusd) το αναγνωρίζει κανονικά,
+      // αλλά ο carrier proxy το βλέπει σαν ένα απλό POST και δεν το μπλοκάρει.
+      overridePatchMethod: true,
       headers: {
         authorization: `Bearer ${supabaseAnonKey}`,
         'x-upsert': 'false'
@@ -347,6 +365,19 @@ const PAGE_SIZE = 60;
 
 export function useEventPhotos(currentEvent, guestData, user) {
   const [photos, setPhotos] = useState([]);
+  // ΔΙΟΡΘΩΣΗ ("780 φωτο στη βάση αλλά ο μετρητής δείχνει 60"): το photos
+  // state κρατάει ΜΟΝΟ ό,τι έχει ήδη φορτωθεί στο gallery (PAGE_SIZE=60 την
+  // πρώτη φορά, + ό,τι φέρει το loadMorePhotos() όταν ο guest κατεβαίνει) -
+  // ΔΕΝ είναι το πραγματικό σύνολο του event. Το EventHero.jsx όμως έδειχνε
+  // photos.length, άρα ο μετρητής "κολλούσε" στο 60 (ή σε όσα είχαν φορτωθεί
+  // μέχρι εκείνη τη στιγμή) ακόμα κι αν το event είχε π.χ. 780 συνολικά.
+  // Το totalPhotoCount είναι ΞΕΧΩΡΙΣΤΟ: μία γρήγορη COUNT query (χωρίς να
+  // κατεβάζει καθόλου δεδομένα - head: true) φέρνει το πραγματικό σύνολο
+  // κατά το άνοιγμα του event, και μετά ενημερώνεται +1 ζωντανά σε κάθε
+  // realtime INSERT (ίδιο postgres_changes listener που ήδη ενημερώνει το
+  // photos state πιο κάτω) - έτσι ο μετρητής στο hero είναι πάντα σωστός,
+  // ανεξάρτητα από το πόσες σελίδες έχει φορτώσει/δει ο guest.
+  const [totalPhotoCount, setTotalPhotoCount] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [hasMorePhotos, setHasMorePhotos] = useState(false);
@@ -457,6 +488,20 @@ export function useEventPhotos(currentEvent, guestData, user) {
       }
     };
 
+    // Πραγματικό σύνολο φωτο/βίντεο του event (βλ. σχόλιο στο
+    // totalPhotoCount πιο πάνω) - ξεχωριστό από το loadPhotos() που φέρνει
+    // μόνο τη σελίδα δεδομένων. { count: 'exact', head: true } ζητάει ΜΟΝΟ
+    // τον αριθμό, χωρίς να κατεβάσει ούτε μία γραμμή δεδομένων.
+    const loadTotalCount = async () => {
+      const { count, error } = await supabase
+        .from('photos')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_id', currentEvent.id);
+      if (!error && typeof count === 'number') {
+        setTotalPhotoCount(count);
+      }
+    };
+
     // ΔΙΟΡΘΩΣΗ (συνέχεια του pagination fix): όταν η καρτέλα ξαναγίνεται
     // ορατή (βλ. handleVisibilityChange πιο κάτω), ΔΕΝ ξαναφορτώνουμε ΟΛΟ
     // το loadPhotos() από την αρχή (αυτό θα πετούσε έξω οποιαδήποτε
@@ -488,6 +533,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
     };
 
     loadPhotos();
+    loadTotalCount();
 
     const channel = supabase
       .channel('photos-changes')
@@ -500,6 +546,15 @@ export function useEventPhotos(currentEvent, guestData, user) {
           filter: `event_id=eq.${currentEvent.id}`
         },
         (payload) => {
+          // Το "exists" ελέγχεται ΕΔΩ (μέσω του ήδη συγχρονισμένου
+          // photosRef, βλ. σχόλιο στον ορισμό του) και όχι μέσα στο
+          // setPhotos updater - αλλιώς το setTotalPhotoCount θα καλούνταν
+          // μέσα σε functional updater, που σε React StrictMode (dev)
+          // μπορεί να τρέξει δύο φορές και να μετρήσει μία φωτο διπλή.
+          const alreadyExists = photosRef.current.some(p => p.id === payload.new.id);
+          if (!alreadyExists) {
+            setTotalPhotoCount(count => count + 1);
+          }
           setPhotos(prev => {
             const exists = prev.find(p => p.id === payload.new.id);
             if (exists) return prev;
@@ -883,25 +938,62 @@ export function useEventPhotos(currentEvent, guestData, user) {
           // αρχείο: τα βίντεο ανεβαίνουν τώρα με resumable (TUS) upload αντί
           // για ένα ενιαίο fetch, ώστε ένα "κόψιμο" στη μέση σε ασταθές
           // δίκτυο να ΣΥΝΕΧΙΖΕΙ από εκεί που έμεινε αντί να ξαναρχίζει απ'
-          // την αρχή. Το tus-js-client έχει ΔΙΚΟ του retry logic
-          // (retryDelays) ειδικό για αυτό - δεν χρειάζεται το γενικό
-          // withNetworkRetry εδώ. Κρατάμε πάντα το withTimeout σαν ΤΕΛΙΚΟ
-          // safety net (10 λεπτά) για να μην κολλήσει το UI επ' αόριστον σε
-          // ένα ακραίο σενάριο όπου ΤΙΠΟΤΑ δεν δουλεύει.
-          uploadData = await withTimeout(
-            tusUploadVideo(file, fileName, {
-              onProgress: (bytesUploaded, bytesTotal) => {
-                const pct = bytesTotal ? Math.round((bytesUploaded / bytesTotal) * 100) : 0;
-                setUploadProgress({
-                  current: completedCount,
-                  total: pendingFiles.length,
-                  videoProgress: pct
-                });
+          // την αρχή. Κρατάμε πάντα το withTimeout σαν ΤΕΛΙΚΟ safety net
+          // (10 λεπτά) για να μην κολλήσει το UI επ' αόριστον.
+          //
+          // ΔΙΟΡΘΩΣΗ v5 ("ακόμα και ΜΙΚΡΑ βίντεο αποτυγχάνουν μέσω TUS σε
+          // συγκεκριμένα carrier δίκτυα" - βλ. εκτενές σχόλιο στο
+          // tusUploadVideo για το πιθανό PATCH-blocking): προσθέσαμε το
+          // overridePatchMethod ΕΚΕΙ σαν την κύρια διόρθωση, αλλά ΕΔΩ
+          // προσθέτουμε ΚΑΙ ένα δεύτερο επίπεδο ασφαλείας - αν το TUS
+          // αποτύχει ΤΕΛΕΙΩΣ (εξάντλησε όλα τα δικά του retries), πέφτουμε
+          // αυτόματα πίσω στο ΠΑΛΙΟ, αποδεδειγμένα αξιόπιστο απλό upload
+          // (ίδιο με των φωτογραφιών) αντί να παραδεχτούμε αποτυχία αμέσως -
+          // έτσι ΔΕΝ χειροτερεύουμε ποτέ σε σχέση με πριν, μόνο βελτιωνόμαστε
+          // όπου το TUS δουλεύει.
+          try {
+            uploadData = await withTimeout(
+              tusUploadVideo(file, fileName, {
+                onProgress: (bytesUploaded, bytesTotal) => {
+                  const pct = bytesTotal ? Math.round((bytesUploaded / bytesTotal) * 100) : 0;
+                  setUploadProgress({
+                    current: completedCount,
+                    total: pendingFiles.length,
+                    videoProgress: pct
+                  });
+                }
+              }),
+              UPLOAD_TIMEOUT_MS_VIDEO,
+              'main_upload_tus'
+            );
+          } catch (tusErr) {
+            console.warn('TUS resumable upload βίντεο απέτυχε - fallback σε απλό upload:', tusErr);
+            const { data: fallbackData, error: fallbackError } = await withNetworkRetry(
+              () =>
+                withTimeout(
+                  supabase.storage
+                    .from('photos')
+                    .upload(fileName, file, {
+                      cacheControl: '3600',
+                      upsert: false,
+                      contentType: file.type || 'video/mp4'
+                    }),
+                  UPLOAD_TIMEOUT_MS_VIDEO,
+                  'main_upload_fallback'
+                ),
+              {
+                onRetry: (attempt, max) => {
+                  setUploadProgress({
+                    current: completedCount,
+                    total: pendingFiles.length,
+                    retry: { attempt, max }
+                  });
+                }
               }
-            }),
-            UPLOAD_TIMEOUT_MS_VIDEO,
-            'main_upload'
-          );
+            );
+            if (fallbackError) throw fallbackError;
+            uploadData = fallbackData;
+          }
         } else {
           // withTimeout εδώ - βλ. σχόλιο στην κορυφή του αρχείου. Χωρίς αυτό,
           // μια φωτογραφία πάνω σε αργό/ασταθές δίκτυο μπορεί να κολλήσει το
@@ -1253,6 +1345,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
   return {
     photos,
     setPhotos,
+    totalPhotoCount,
     uploading,
     error,
     setError,

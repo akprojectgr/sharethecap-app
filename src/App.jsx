@@ -137,6 +137,7 @@ export default function KlevApp() {
   const {
     photos,
     setPhotos,
+    totalPhotoCount,
     handleFileSelected,
     handleMoreFilesSelected,
     removePendingPhoto,
@@ -334,7 +335,7 @@ export default function KlevApp() {
       {!isLightboxOpen && (
         <EventHero
           event={currentEvent}
-          photoCount={photos.length}
+          photoCount={totalPhotoCount}
           tagline={currentEvent?.tagline || 'Different moments, same celebration. All yours.'}
           categories={categories}
           activeTab={activeTab}
