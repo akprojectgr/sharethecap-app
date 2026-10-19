@@ -399,42 +399,8 @@ async function withNetworkRetry(fn, { onRetry } = {}) {
 // Supabase SQL editor:
 //   select * from upload_errors order by created_at desc;
 //   select * from upload_errors where status = 'error' order by created_at desc;
-// ΔΙΑΓΝΩΣΤΙΚΑ ("θέλω να ξέρω τι ΠΡΑΓΜΑΤΙΚΑ έγινε, όχι μόνο 'Failed to
-// fetch'"): το ίδιο το μήνυμα σφάλματος του browser δεν λέει αν η συσκευή
-// ήταν offline, αν η καρτέλα είχε παραμεριστεί/κλειδωθεί η οθόνη, ή πόσο
-// είχε προχωρήσει το upload πριν κοπεί - αυτά τα μετράμε ΕΜΕΙΣ τη στιγμή
-// του αποτελέσματος (επιτυχία ή αποτυχία) και τα καταγράφουμε μαζί, ώστε να
-// μπορεί κανείς να ξεχωρίσει π.χ. "η συσκευή έχασε εντελώς το internet" από
-// "η καρτέλα παραμερίστηκε για λίγο" από "απλά αργό δίκτυο σε μεγάλο αρχείο".
-// navigator.connection δεν υπάρχει σε Safari/iOS - μένει null εκεί, no-op.
-function captureRuntimeDiagnostics() {
+function logUploadEvent({ status, eventId, errorType, errorMessage, fileName, filePath, fileSizeBytes, isVideo, guestName }) {
   try {
-    return {
-      wasOnline: typeof navigator !== 'undefined' ? navigator.onLine : null,
-      wasHidden: typeof document !== 'undefined' ? document.visibilityState !== 'visible' : null,
-      connectionType: (typeof navigator !== 'undefined' && navigator.connection && navigator.connection.effectiveType) || null
-    };
-  } catch (_err) {
-    return { wasOnline: null, wasHidden: null, connectionType: null };
-  }
-}
-
-function logUploadEvent({
-  status,
-  eventId,
-  errorType,
-  errorMessage,
-  fileName,
-  filePath,
-  fileSizeBytes,
-  isVideo,
-  guestName,
-  stage,
-  elapsedMs,
-  retryAttempts
-}) {
-  try {
-    const diagnostics = captureRuntimeDiagnostics();
     supabase.from('upload_errors').insert([{
       status,
       event_id: eventId || null,
@@ -445,13 +411,7 @@ function logUploadEvent({
       file_size_bytes: typeof fileSizeBytes === 'number' ? fileSizeBytes : null,
       is_video: !!isVideo,
       guest_name: guestName || null,
-      user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
-      stage: stage || null,
-      elapsed_ms: typeof elapsedMs === 'number' ? Math.round(elapsedMs) : null,
-      was_online: diagnostics.wasOnline,
-      was_hidden: diagnostics.wasHidden,
-      connection_type: diagnostics.connectionType,
-      retry_attempts: typeof retryAttempts === 'number' ? retryAttempts : 0
+      user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null
     }]).then(({ error }) => {
       if (error) console.error('logUploadEvent insert failed:', error);
     });
@@ -468,7 +428,14 @@ function logUploadError(args) {
 
 // Ανώτατο όριο αναμονής ανά αρχείο - πιο γενναιόδωρο για βίντεο (μεγαλύτερα
 // αρχεία, φυσιολογικά πιο αργά) απ' ό,τι για φωτογραφίες.
-const UPLOAD_TIMEOUT_MS_PHOTO = 45 * 1000; // 45 δευτ.
+// ΔΙΟΡΘΩΣΗ (πραγματικά δεδομένα από test event - 4 timeout σε αργό 3G): με
+// CONCURRENT_UPLOADS=4 ταυτόχρονα αρχεία, σε αργό δίκτυο (3G) μοιράζονται
+// το ήδη περιορισμένο bandwidth - φωτογραφίες ~4MB χρειάστηκαν 33-46 δευτ.,
+// δηλ. πολύ κοντά ή πάνω από το παλιό όριο των 45 δευτ. Ανεβάζουμε σε 75
+// δευτ. ώστε να έχουμε αρκετό περιθώριο σε αργό δίκτυο σε venue με πολύ
+// κόσμο μαζί (π.χ. 80+ άτομα), χωρίς να αφήνουμε το UI να κολλάει για πάντα
+// σε πραγματικά κολλημένο αίτημα (βλ. withTimeout).
+const UPLOAD_TIMEOUT_MS_PHOTO = 75 * 1000; // 75 δευτ.
 // Ανέβηκε από 2 σε 5 λεπτά μαζί με το όριο μεγέθους (200MB -> 500MB), και
 // τώρα από 5 σε 10 λεπτά μαζί με το νέο όριο (500MB -> 1GB) - ένα
 // μεγαλύτερο 4K βίντεο σε αργότερο δίκτυο χρειάζεται φυσιολογικά παραπάνω
@@ -1134,18 +1101,6 @@ export function useEventPhotos(currentEvent, guestData, user) {
 
     const uploadOneFile = async (i) => {
       const file = pendingFiles[i];
-      // ΔΙΑΓΝΩΣΤΙΚΑ - βλ. εκτενές σχόλιο στο logUploadEvent: fileStartedAt
-      // μετράει πόσο χρόνο πήρε ΣΥΝΟΛΙΚΑ αυτό το αρχείο μέχρι το αποτέλεσμα
-      // (επιτυχία ή αποτυχία) - βοηθάει να ξεχωρίσεις "αργό δίκτυο" (π.χ.
-      // κόπηκε μετά από 8 λεπτά σε βίντεο) από "στιγμιαία διακοπή" (κόπηκε
-      // αμέσως). currentStage ενημερώνεται πριν από κάθε βήμα ώστε, αν
-      // πεταχτεί σφάλμα, να ξέρουμε ΠΟΙΟ βήμα έφταιξε (ανέβασμα κύριου
-      // αρχείου, preview, ή εγγραφή στη βάση) αντί μόνο "κάπου απέτυχε".
-      // retryAttempts μετράει πόσες αυτόματες επαναπροσπάθειες έγιναν ήδη
-      // (βλ. withNetworkRetry/onRetry πιο κάτω) πριν το τελικό αποτέλεσμα.
-      const fileStartedAt = Date.now();
-      let currentStage = 'main_upload';
-      let fileRetryAttempts = 0;
       try {
         const isVideo = isVideoFile(file);
         const safeName = file.name || (isVideo ? 'video.mp4' : 'photo.jpg');
@@ -1224,7 +1179,6 @@ export function useEventPhotos(currentEvent, guestData, user) {
                 ),
               {
                 onRetry: (attempt, max) => {
-                  fileRetryAttempts = attempt;
                   setUploadProgress({
                     current: completedCount,
                     total: pendingFiles.length,
@@ -1262,7 +1216,6 @@ export function useEventPhotos(currentEvent, guestData, user) {
               ),
             {
               onRetry: (attempt, max) => {
-                fileRetryAttempts = attempt;
                 setUploadProgress({
                   current: completedCount,
                   total: pendingFiles.length,
@@ -1294,7 +1247,6 @@ export function useEventPhotos(currentEvent, guestData, user) {
         // gallery δείχνει πάντα μια ελαφριά εικόνα, ποτέ δεν χρειάζεται να
         // "τραβήξει" ολόκληρο το βίντεο μόνο για το thumbnail του.
         let previewPath = null;
-        currentStage = 'preview_upload';
         try {
           const previewBlob = isVideo
             ? await createVideoThumbnail(file, 800, 0.75)
@@ -1326,7 +1278,6 @@ export function useEventPhotos(currentEvent, guestData, user) {
 
         const uploaderName = guestData?.name || 'anonymous';
         const deleteToken = crypto.randomUUID();
-        currentStage = 'db_insert';
 
         // ΔΙΟΡΘΩΣΗ (code review - "διπλή φωτογραφία σε ασταθές δίκτυο"): το
         // withNetworkRetry ξανακάνει insert σε ΟΠΟΙΟΔΗΠΟΤΕ "Failed to fetch"/
@@ -1370,12 +1321,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
             })(),
             DB_INSERT_TIMEOUT_MS,
             'db_insert'
-          ),
-          {
-            onRetry: (attempt) => {
-              fileRetryAttempts = attempt;
-            }
-          }
+          )
         );
 
         if (dbError) throw dbError;
@@ -1392,10 +1338,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
           filePath: uploadData.path,
           fileSizeBytes: file.size,
           isVideo,
-          guestName: guestData?.name,
-          stage: 'success',
-          elapsedMs: Date.now() - fileStartedAt,
-          retryAttempts: fileRetryAttempts
+          guestName: guestData?.name
         });
 
         // ΔΙΟΡΘΩΣΗ (βλ. remuxVideoForInstantPlayback στην κορυφή του αρχείου):
@@ -1447,10 +1390,7 @@ export function useEventPhotos(currentEvent, guestData, user) {
           fileName: file?.name,
           fileSizeBytes: file?.size,
           isVideo: isVideoFile(file),
-          guestName: guestData?.name,
-          stage: currentStage,
-          elapsedMs: Date.now() - fileStartedAt,
-          retryAttempts: fileRetryAttempts
+          guestName: guestData?.name
         });
         console.error(fileErr);
       } finally {
