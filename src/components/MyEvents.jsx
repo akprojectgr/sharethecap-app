@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import QrScanner from './QrScanner';
 import { supabase } from '../lib/supabaseClient';
+import { friendlyErrorMessage } from '../lib/friendlyError';
 
 // Σελίδα "My Events" - η landing page για έναν ήδη συνδεδεμένο χρήστη
 // (μετά το onAuthed του AuthForm.jsx). Δείχνει όλα τα events στα οποία ο
@@ -174,7 +175,20 @@ function AddEventModal({ onClose, onJoined }) {
         .eq('is_active', true)
         .single();
       if (findError || !event) {
-        setError('Δεν βρέθηκε event με αυτόν τον κωδικό.');
+        // ΔΙΟΡΘΩΣΗ (code review - "ο guest βλέπει 'δεν βρέθηκε event' ενώ
+        // στην πραγματικότητα έπεσε το δίκτυο"): το .single() του Supabase
+        // επιστρέφει error.code 'PGRST116' ΜΟΝΟ όταν πραγματικά δεν βρέθηκε
+        // καμία γραμμή (άρα ο κωδικός όντως δεν υπάρχει/δεν είναι ενεργό) -
+        // οποιοδήποτε ΑΛΛΟ σφάλμα (πτώση WiFi/data, timeout) είναι
+        // τελείως διαφορετικό πρόβλημα και δεν πρέπει να δείχνεται σαν
+        // "λάθος κωδικός", αλλιώς ο χρήστης νομίζει ότι έγραψε κάτι λάθος
+        // ενώ απλά χρειάζεται να ξαναδοκιμάσει.
+        const isGenuinelyNotFound = !findError || findError.code === 'PGRST116';
+        setError(
+          isGenuinelyNotFound
+            ? 'Δεν βρέθηκε event με αυτόν τον κωδικό.'
+            : friendlyErrorMessage(findError, 'Δεν βρέθηκε event με αυτόν τον κωδικό.')
+        );
         return;
       }
 
@@ -214,7 +228,7 @@ function AddEventModal({ onClose, onJoined }) {
 
       onJoined?.(event);
     } catch (err) {
-      setError(err.message || 'Κάτι πήγε στραβά. Δοκίμασε ξανά.');
+      setError(friendlyErrorMessage(err, 'Κάτι πήγε στραβά. Δοκίμασε ξανά.'));
     } finally {
       setLoading(false);
     }

@@ -142,10 +142,38 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
     let cancelled = false;
     setCheckingName(true);
     const timer = setTimeout(async () => {
-      const taken = await checkGuestNameTaken({ eventId: event.id, name: trimmed });
-      if (!cancelled) {
-        setNameTaken(taken);
-        setCheckingName(false);
+      // ΔΙΟΡΘΩΣΗ (QA test σε πραγματικές συνθήκες δικτύου - κόλλησε μόνιμα
+      // το κουμπί Join Party απενεργοποιημένο, σε τυχαία διαφορετική
+      // συσκευή κάθε φορά): δεν αρκεί το try/catch - αν το αίτημα απλά
+      // ΚΡΕΜΑΣΕΙ (δεν απαντάει καθόλου, ούτε πετυχαίνει ούτε πετάει σφάλμα
+      // - π.χ. πρόσκαιρο πρόβλημα δικτύου/server χωρίς το Supabase client
+      // να το προλάβει), το catch δεν τρέχει ποτέ και το setCheckingName(false)
+      // δεν γίνεται - το κουμπί έμενε disabled ΓΙΑ ΠΑΝΤΑ χωρίς κανένα
+      // μήνυμα στον guest. Προσθέτουμε ρητό όριο 5 δευτ.: ό,τι και να
+      // γίνει, ανοίγουμε ξανά το κουμπί (fail-open - ίδια λογική με το ήδη
+      // υπάρχον fallback μέσα στο checkGuestNameTaken για το {error}
+      // περίπτωση) - ο guest δεν περιμένει ποτέ πάνω από 5 δευτ.
+      let taken = false;
+      try {
+        const TIMEOUT = Symbol('timeout');
+        const result = await Promise.race([
+          checkGuestNameTaken({ eventId: event.id, name: trimmed }),
+          new Promise((resolve) => setTimeout(() => resolve(TIMEOUT), 5000))
+        ]);
+        if (result === TIMEOUT) {
+          console.log('checkGuestNameTaken timeout (>5s) - προχωράμε κανονικά');
+          taken = false;
+        } else {
+          taken = result;
+        }
+      } catch (err) {
+        console.log('checkGuestNameTaken threw', err?.message);
+        taken = false;
+      } finally {
+        if (!cancelled) {
+          setNameTaken(taken);
+          setCheckingName(false);
+        }
       }
     }, 450);
     return () => {
@@ -163,14 +191,7 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
   // αργό venue wifi) δεν μπλόκαρε το κουμπί - ο guest μπορούσε να πατήσει
   // Join Party ΜΕΣΑ στο παράθυρο των ~450ms+network πριν φανεί "το όνομα
   // υπάρχει ήδη" και να μπει στο event με όνομα που θα απορριφθεί μετά.
-  // Ο ίδιος άνθρωπος μπορεί να ξαναμπεί από ΑΛΛΗ συσκευή/browser (π.χ.
-  // άνοιξε το link από WhatsApp αντί για την κάμερα) - τότε το όνομά του
-  // φαίνεται "πιασμένο". Του δίνουμε ρητή επιλογή "Είμαι εγώ" αντί να
-  // κολλήσει έξω από το event.
-  const [confirmedSameName, setConfirmedSameName] = useState(false);
-  useEffect(() => { setConfirmedSameName(false); }, [guestName]);
-
-  const canContinue = !!guestName.trim() && (!nameTaken || confirmedSameName) && !hasProfanity && !checkingName;
+  const canContinue = !!guestName.trim() && !nameTaken && !hasProfanity && !checkingName;
 
   // Ίδιο pattern με το FloatingAddMenu (uploading -> opacity 0.6 στο ίδιο
   // κουμπί) αντί για ξεχωριστό γκρι/λευκό "disabled" χρώμα - το κουμπί
@@ -281,19 +302,10 @@ export default function GuestSignIn({ event, onContinue, defaultName = '' }) {
           <p style={styles.nameWarning}>
             {t('guestSignIn.profanityWarning')}
           </p>
-        ) : nameTaken && !confirmedSameName ? (
-          <>
-            <p style={styles.nameWarning}>
-              {t('guestSignIn.nameTakenWarning')}
-            </p>
-            <button
-              type="button"
-              onClick={() => setConfirmedSameName(true)}
-              style={{ background: 'none', border: 'none', color: 'inherit', textDecoration: 'underline', opacity: 0.85, fontSize: '13px', cursor: 'pointer', padding: '6px 0', fontFamily: 'inherit' }}
-            >
-              {t('guestSignIn.itsMe')}
-            </button>
-          </>
+        ) : nameTaken ? (
+          <p style={styles.nameWarning}>
+            {t('guestSignIn.nameTakenWarning')}
+          </p>
         ) : (
           <p style={styles.nameFootnote}>{t('guestSignIn.footnote')}</p>
         )}

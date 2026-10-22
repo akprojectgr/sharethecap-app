@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import { upsertEventGuest } from './guests';
+import { friendlyErrorMessage } from './friendlyError';
 
 // ΔΙΟΡΘΩΣΗ ("κολλάει σε παλιό event"): αν ο χρήστης έχει ΗΔΗ μπει ποτέ σε
 // ένα event σε αυτή τη συσκευή (π.χ. δοκιμαστικό TEST11507), το localStorage
@@ -106,7 +107,20 @@ export function useKlevSession() {
     setJoining(false);
 
     if (error || !data) {
-      setError('Λάθος κωδικός event ή μη έγκυρο QR.');
+      // ΔΙΟΡΘΩΣΗ (έλεγχος κώδικα - "ο guest βλέπει 'λάθος κωδικός' ενώ
+      // στην πραγματικότητα έπεσε το δίκτυο"): αυτό είναι η ΠΡΩΤΗ οθόνη
+      // που βλέπει κάθε καλεσμένος (κωδικός/QR) - αν το Supabase query
+      // αποτύχει επειδή έπεσε στιγμιαία το WiFi/data του guest (ή venue
+      // δίκτυο), το .single() επιστρέφει error.code 'PGRST116' ΜΟΝΟ όταν
+      // όντως δεν βρέθηκε καμία γραμμή (ο κωδικός δεν υπάρχει) - οποιοδήποτε
+      // ΑΛΛΟ σφάλμα είναι πρόβλημα σύνδεσης/server, όχι λάθος κωδικός, και
+      // δεν πρέπει να μπερδεύει τον guest λέγοντάς του ότι έγραψε κάτι λάθος.
+      const isGenuinelyNotFound = !error || error.code === 'PGRST116';
+      setError(
+        isGenuinelyNotFound
+          ? 'Λάθος κωδικός event ή μη έγκυρο QR.'
+          : friendlyErrorMessage(error, 'Λάθος κωδικός event ή μη έγκυρο QR.')
+      );
       return;
     }
 

@@ -77,9 +77,34 @@ export default function FloatingAddMenu({
   const openPicker = (inputRef) => {
     acquireUploadBusy('picker');
     clearTimeout(pickerHoldTimeoutRef.current);
+    // ΔΙΟΡΘΩΣΗ (code review - "το 90άρι safety-net μπορεί να λήξει ΕΝΩ το
+    // picker είναι ακόμα πραγματικά ανοιχτό"): σε αργή συσκευή ή μεγάλη
+    // συλλογή φωτο/βίντεο στο κινητό, ένας guest μπορεί εύλογα να
+    // χρειαστεί περισσότερο από 90 δευτ. για να βρει/επιλέξει αρχείο - αν
+    // λήξει το timeout ΠΡΙΝ κλείσει το picker, ξαναεκτίθεται ακριβώς το
+    // force-reload-στη-μέση bug που αυτό το κλείδωμα υπάρχει για να
+    // αποτρέψει. Αυξάνουμε το safety-net σε 5 λεπτά (γενναιόδωρο αλλά
+    // πεπερασμένο όριο, ποτέ "για πάντα") ΚΑΙ προσθέτουμε έναν 'focus'
+    // listener που λύνει το κλείδωμα ΑΜΕΣΩΣ μόλις η σελίδα ξαναγίνει ενεργή -
+    // αυτή είναι η πιο αξιόπιστη ένδειξη ότι το native picker πράγματι
+    // έκλεισε (είτε με επιλογή είτε με ακύρωση, βλ. ίδιο idiom στο
+    // useEventPhotos.js για visibilitychange/focus) - έτσι δεν μένει
+    // κλειδωμένο άσκοπα για ολόκληρα 5 λεπτά στην πολύ πιο συνηθισμένη
+    // περίπτωση που ο guest απλά ακύρωσε/επέλεξε γρήγορα. Το
+    // releaseUploadBusy είναι ασφαλές να κληθεί παραπάνω από μία φορά (Set,
+    // βλ. uploadBusy.js) - δεν υπάρχει κίνδυνος να «ξεκλειδώσει διπλά».
     pickerHoldTimeoutRef.current = setTimeout(() => {
+      window.removeEventListener('focus', handleFocusReturn);
       releaseUploadBusy('picker');
-    }, 90 * 1000);
+    }, 5 * 60 * 1000);
+
+    function handleFocusReturn() {
+      window.removeEventListener('focus', handleFocusReturn);
+      clearTimeout(pickerHoldTimeoutRef.current);
+      releaseUploadBusy('picker');
+    }
+    window.addEventListener('focus', handleFocusReturn);
+
     inputRef.current?.click();
   };
 
@@ -132,6 +157,41 @@ export default function FloatingAddMenu({
             zIndex: 55
           }}
         />
+      )}
+
+      {/* ΔΙΟΡΘΩΣΗ ("ο guest δεν ξέρει το όριο διάρκειας βίντεο παρά μόνο
+      ΑΦΟΥ το ανεβάσει και απορριφθεί"): επαγγελματικό UX θέλει τον
+      περιορισμό ΟΡΑΤΟ ΠΡΟΛΗΠΤΙΚΑ, πριν ο guest καν ανοίξει την κάμερα/
+      συλλογή - όχι μόνο αντιδραστικά μέσω του μηνύματος σφάλματος (βλ.
+      useEventPhotos.js) αφού το επιλέξει. Ανεξάρτητο fixed στοιχείο
+      (όχι μέσα στο flex row του μενού παρακάτω) ώστε να ΜΗΝ επηρεάζει
+      καθόλου το υπάρχον layout - εμφανίζεται ΜΟΝΟ όσο είναι ανοιχτό το
+      υπο-μενού (ίδια συνθήκη με το ίδιο το μενού), ακριβώς από πάνω του.
+      Το ίδιο όριο (5 λεπτά) με το MAX_VIDEO_DURATION_SECONDS στο
+      useEventPhotos.js - αν αλλάξει εκεί, άλλαξέ το και εδώ. */}
+      {addMenuOpen && !hasDraft && (
+        <div
+          style={{
+            position: 'fixed',
+            right: '22px',
+            bottom: '94px',
+            zIndex: 60,
+            padding: '6px 14px',
+            background: 'rgba(38, 42, 33, 0.95)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+            border: '1px solid rgba(230, 197, 148, 0.25)',
+            borderRadius: '9999px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+            color: 'rgba(255,255,255,0.8)',
+            fontSize: '12px',
+            fontWeight: '500',
+            whiteSpace: 'nowrap',
+            animation: 'menuPopIn 0.22s cubic-bezier(.22,.9,.3,1.3)'
+          }}
+        >
+          Βίντεο έως 5 λεπτά
+        </div>
       )}
 
       <div style={{

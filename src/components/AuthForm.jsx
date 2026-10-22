@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabaseClient';
+import { friendlyErrorMessage } from '../lib/friendlyError';
 
 // Ενιαία φόρμα σύνδεσης - passwordless, με email + 6ψήφιο κωδικό
 // επιβεβαίωσης (OTP) αντί για password. ΔΕΝ υπάρχει πια ξεχωριστό "Login"
@@ -74,7 +75,7 @@ export default function AuthForm({ onClose, onAuthed }) {
       if (otpError) throw otpError;
       setStep('code');
     } catch (err) {
-      setError(err.message || 'Κάτι πήγε στραβά. Δοκίμασε ξανά.');
+      setError(friendlyErrorMessage(err, 'Κάτι πήγε στραβά. Δοκίμασε ξανά.'));
     } finally {
       setLoading(false);
     }
@@ -123,7 +124,7 @@ export default function AuthForm({ onClose, onAuthed }) {
       setError(
         err.message?.includes('expired') || err.message?.includes('invalid')
           ? 'Λάθος ή ληγμένος κωδικός.'
-          : err.message || 'Κάτι πήγε στραβά. Δοκίμασε ξανά.'
+          : friendlyErrorMessage(err, 'Κάτι πήγε στραβά. Δοκίμασε ξανά.')
       );
     } finally {
       setLoading(false);
@@ -152,7 +153,7 @@ export default function AuthForm({ onClose, onAuthed }) {
       }
       onAuthed?.(pendingUser, name.trim());
     } catch (err) {
-      setError(err.message || 'Δεν αποθηκεύτηκε το όνομα. Δοκίμασε ξανά.');
+      setError(friendlyErrorMessage(err, 'Δεν αποθηκεύτηκε το όνομα. Δοκίμασε ξανά.'));
     } finally {
       setLoading(false);
     }
@@ -168,7 +169,7 @@ export default function AuthForm({ onClose, onAuthed }) {
       });
       if (otpError) throw otpError;
     } catch (err) {
-      setError(err.message || 'Δεν στάλθηκε ο κωδικός. Δοκίμασε ξανά.');
+      setError(friendlyErrorMessage(err, 'Δεν στάλθηκε ο κωδικός. Δοκίμασε ξανά.'));
     } finally {
       setLoading(false);
     }
