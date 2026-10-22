@@ -17,3 +17,28 @@ body {
 #root {
   font-family: 'Manrope', sans-serif !important;
 }
+
+/* ΔΙΟΡΘΩΣΗ (ζωντανός μετρητής φωτογραφιών στο EventHero): "pop" εφέ στο
+   νούμερο κάθε φορά που ολοκληρώνεται ένα νέο ανέβασμα - μεγαλώνει στιγμιαία
+   και ανάβει στο χρυσό χρώμα της εφαρμογής, μετά επιστρέφει ομαλά. */
+@keyframes photoCountPop {
+  0% {
+    transform: scale(1);
+    color: inherit;
+    text-shadow: none;
+  }
+  35% {
+    transform: scale(1.4);
+    color: #E6C594;
+    text-shadow: 0 0 12px rgba(230, 197, 148, 0.7);
+  }
+  100% {
+    transform: scale(1);
+    color: inherit;
+    text-shadow: none;
+  }
+}
+
+.photo-count-pulse {
+  animation: photoCountPop 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
