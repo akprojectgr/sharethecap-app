@@ -1,6 +1,65 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useLanguage } from '../lib/i18n';
+
+// ΝΕΟ: κουμπί-link προς το ίδιο το ShareTheCap website (ΟΧΙ ανά event/
+// ζευγάρι - είναι το ίδιο link σε ΟΛΑ τα events), για guests που θέλουν να
+// μάθουν τι είναι η εφαρμογή και να τη χρησιμοποιήσουν στον δικό τους γάμο.
+// Σταθερό constant αντί για πεδίο στη βάση, αφού δεν αλλάζει ανά event.
+const SHARETHECAP_WEBSITE_URL = 'https://sharethecap.gr';
+
+// ΔΙΟΡΘΩΣΗ (ζωντανός μετρητής φωτογραφιών - "εντυπωσιακό" ανέβασμα νούμερου):
+// Αντί το {photoCount} να πηδάει κατευθείαν στο νέο νούμερο (π.χ. 10 -> 11
+// ξαφνικά), αυτό το hook μετράει ομαλά από την παλιά τιμή στη νέα (σαν
+// odometer) ΚΑΙ κάνει ένα στιγμιαίο "pop" (μεγαλώνει/λάμπει) το νούμερο όταν
+// αλλάζει - έτσι κάθε νέα φωτογραφία/βίντεο που ολοκληρώνει ανέβασμα (ζωντανά,
+// μέσα από photos.length στο App.jsx) φαίνεται καθαρά στον guest.
+function useAnimatedCount(value) {
+  const [display, setDisplay] = useState(value);
+  const [pulse, setPulse] = useState(false);
+  const frameRef = useRef(null);
+  const fromRef = useRef(value);
+
+  useEffect(() => {
+    if (value === fromRef.current) return undefined;
+
+    const from = fromRef.current;
+    const to = value;
+    const start = performance.now();
+    // Διάρκεια ανάλογη με τη διαφορά (πιο αργή για μεγάλα άλματα, π.χ. αρχικό
+    // φόρτωμα πολλών φωτογραφιών), αλλά με ανώτατο όριο ώστε να μη "σέρνεται".
+    const duration = Math.min(900, Math.max(350, Math.abs(to - from) * 60));
+
+    cancelAnimationFrame(frameRef.current);
+
+    function tick(now) {
+      const progress = Math.min(1, (now - start) / duration);
+      // easeOutCubic - γρήγορο ξεκίνημα, ομαλή "προσγείωση" στο τέλος.
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplay(Math.round(from + (to - from) * eased));
+      if (progress < 1) {
+        frameRef.current = requestAnimationFrame(tick);
+      } else {
+        fromRef.current = to;
+      }
+    }
+    frameRef.current = requestAnimationFrame(tick);
+
+    setPulse(true);
+    const pulseTimeout = setTimeout(() => setPulse(false), 420);
+
+    return () => {
+      cancelAnimationFrame(frameRef.current);
+      clearTimeout(pulseTimeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  return { display, pulse };
+}
 
 export default function EventHero({ event, eventName, photoCount = 0, tagline, user, onLogout, categories = [], activeTab = 'all', onTabChange }) {
+  const { t } = useLanguage();
+  const { display: animatedPhotoCount, pulse: photoCountPulse } = useAnimatedCount(photoCount);
   const displayName =
     (event?.event_category === 'wedding' && event?.couple_names?.trim()) ||
     event?.event_name ||
@@ -13,6 +72,23 @@ export default function EventHero({ event, eventName, photoCount = 0, tagline, u
     { key: 'liked', label: '❤ Αγαπημένες' }
   ];
 
+  // ΝΕΟ (tracking από πού ήρθε το lead): προσθέτουμε στο link προς το
+  // sharethecap.gr ποιο event/ζευγάρι το "έστειλε" - ?ref=<event id>&from=<ονόματα>.
+  // Αυτό ΔΕΝ αλλάζει τίποτα στην εφαρμογή (ίδιο target="_blank" link όπως
+  // πριν) - μόνο προσθέτει info στο URL ώστε το sharethecap.gr (ξεχωριστός
+  // κώδικας) να μπορεί αργότερα να το διαβάσει. Try/catch-ασφαλές: αν
+  // λείπει το event.id, στέλνει απλά το βασικό URL χωρίς params.
+  let websiteLinkUrl = SHARETHECAP_WEBSITE_URL;
+  try {
+    if (event?.id) {
+      const params = new URLSearchParams({ ref: event.id });
+      if (displayName) params.set('from', displayName);
+      websiteLinkUrl = `${SHARETHECAP_WEBSITE_URL}/?${params.toString()}`;
+    }
+  } catch {
+    websiteLinkUrl = SHARETHECAP_WEBSITE_URL;
+  }
+
   return (
     <div style={styles.container}>
       {/* TopBar - το profile/login κουμπί αφαιρέθηκε: κανένας guest δεν
@@ -22,20 +98,37 @@ export default function EventHero({ event, eventName, photoCount = 0, tagline, u
       λογαριασμός) - όχι ένα κουμπί που οδηγεί σε login που πια δεν χρειάζεται. */}
       <div style={styles.topBar}>
         <img src="/Logo3.svg" alt="Sharethecap" style={styles.logo} />
-        {user && (
-          <button
-            type="button"
-            onClick={onLogout}
-            aria-label="Αποσύνδεση"
-            style={styles.profileBtn}
+        <div style={styles.topBarRight}>
+          {/* Κουμπί-link προς το ShareTheCap website - ίδιο σε ΟΛΑ τα events
+          (βλ. SHARETHECAP_WEBSITE_URL πιο πάνω). Στην ίδια ευθεία με το logo,
+          δεξιά στο topBar. */}
+          <a
+            href={websiteLinkUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={styles.websiteLink}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <path d="M16 17l5-5-5-5" />
-              <path d="M21 12H9" />
+            {t('eventHero.discountCta')}
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={styles.websiteLinkArrow}>
+              <path d="M7 17L17 7" />
+              <path d="M8 7h9v9" />
             </svg>
-          </button>
-        )}
+          </a>
+          {user && (
+            <button
+              type="button"
+              onClick={onLogout}
+              aria-label="Αποσύνδεση"
+              style={styles.profileBtn}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <path d="M16 17l5-5-5-5" />
+                <path d="M21 12H9" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Editorial Hero Content (Flat) */}
@@ -50,7 +143,13 @@ export default function EventHero({ event, eventName, photoCount = 0, tagline, u
               <path d="M12 9a3.75 3.75 0 100 7.5A3.75 3.75 0 0012 9z" />
               <path fillRule="evenodd" clipRule="evenodd" d="M9.344 3.071a49.52 49.52 0 015.312 0c.967.052 1.83.585 2.332 1.39l.821 1.317c.24.383.645.643 1.11.71.386.054.77.113 1.152.177 1.432.239 2.429 1.493 2.429 2.909V18a3 3 0 01-3 3H4.5a3 3 0 01-3-3V9.574c0-1.416.997-2.67 2.429-2.909.382-.064.766-.123 1.151-.178a1.56 1.56 0 001.11-.71l.822-1.315a2.942 2.942 0 012.332-1.39zM6.75 12.75a5.25 5.25 0 1110.5 0 5.25 5.25 0 01-10.5 0z" />
             </svg>
-            {photoCount}
+            <span
+              className={photoCountPulse ? 'photo-count-pulse' : ''}
+              style={styles.photoCountNumber}
+              data-testid="photo-count"
+            >
+              {animatedPhotoCount}
+            </span>
           </span>
         </div>
       </div>
@@ -90,6 +189,11 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'space-between'
   },
+  topBarRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
+  },
   logo: {
     height: '20px',
     width: 'auto',
@@ -123,9 +227,25 @@ const styles = {
   metaRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    flexWrap: 'wrap',
+    rowGap: '8px',
+    columnGap: '10px',
     fontSize: '13px',
     fontWeight: '400'
+  },
+  websiteLink: {
+    flexShrink: 0,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    color: '#E6C594',
+    fontSize: '13px',
+    fontWeight: '600',
+    textDecoration: 'none',
+    whiteSpace: 'nowrap'
+  },
+  websiteLinkArrow: {
+    flexShrink: 0
   },
   tagline: {
     color: '#E6C594',
@@ -142,6 +262,10 @@ const styles = {
   },
   photoIcon: {
     flexShrink: 0
+  },
+  photoCountNumber: {
+    display: 'inline-block',
+    fontVariantNumeric: 'tabular-nums'
   },
   tabsBar: {
     display: 'flex',

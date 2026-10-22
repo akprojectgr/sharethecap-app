@@ -55,7 +55,6 @@ const translations = {
     'guestSignIn.namePlaceholder': 'e.g. John Smith',
     'guestSignIn.profanityWarning': 'Please use your real name, without inappropriate words 🙂',
     'guestSignIn.nameTakenWarning': 'There is already a guest with this name — add something to stand out (e.g. last name)',
-    'guestSignIn.itsMe': "It's me (I joined from another phone/browser)",
     'guestSignIn.footnote': "The couple will know who took each moment",
     'guestSignIn.continue': 'Join Party',
 
@@ -78,6 +77,7 @@ const translations = {
     'eventHero.allPhotos': 'All',
     'eventHero.photoCount_one': '{{count}} photo',
     'eventHero.photoCount_other': '{{count}} photos',
+    'eventHero.discountCta': '20% off for you',
 
     // --- PhotoGallery ---
     'photoGallery.empty': 'No photos yet',
@@ -205,7 +205,6 @@ const translations = {
     'guestSignIn.namePlaceholder': 'π.χ. Γιάννης Παπαδόπουλος',
     'guestSignIn.profanityWarning': 'Χρησιμοποίησε το πραγματικό σου όνομα, χωρίς ακατάλληλες λέξεις 🙂',
     'guestSignIn.nameTakenWarning': 'Υπάρχει ήδη καλεσμένος/η με αυτό το όνομα — πρόσθεσε κάτι για να ξεχωρίζεις (π.χ. επώνυμο)',
-    'guestSignIn.itsMe': 'Είμαι εγώ (μπήκα από άλλο κινητό/browser)',
     'guestSignIn.footnote': 'Το ζευγάρι θα ξέρει ποιος τράβηξε κάθε στιγμή',
     'guestSignIn.continue': 'Join Party',
 
@@ -224,6 +223,7 @@ const translations = {
     'eventHero.allPhotos': 'Όλες',
     'eventHero.photoCount_one': '{{count}} φωτογραφία',
     'eventHero.photoCount_other': '{{count}} φωτογραφίες',
+    'eventHero.discountCta': '20% έκπτωση για σένα',
 
     'photoGallery.empty': 'Δεν υπάρχουν ακόμα φωτογραφίες',
     'photoGallery.emptySubtitle': 'Γίνε ο πρώτος που θα προσθέσει μια ανάμνηση!',
