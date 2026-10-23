@@ -495,6 +495,8 @@ export default function KlevApp() {
           pendingFiles={pendingFiles}
           onRemovePhoto={removePendingPhoto}
           onAddMoreFiles={handleMoreFilesSelected}
+          onOpenPhotoCapture={() => setShowPhotoCapture(true)}
+          onOpenVideoRecorder={() => setShowVideoRecorder(true)}
           onConfirm={confirmUpload}
           onCancel={cancelUpload}
           onDismiss={hidePreviewDraft}

@@ -462,7 +462,9 @@ const styles = {
   overlay: {
     position: 'fixed',
     inset: 0,
-    zIndex: 200,
+    // Πάνω από το PhotoPreviewModal (zIndex 9999-10001), γιατί η κάμερα
+    // ανοίγει και από το "+ Προσθήκη" μέσα στο modal.
+    zIndex: 20000,
     background: '#000',
     display: 'flex',
     flexDirection: 'column',

@@ -1,7 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { isVideoFile } from '../lib/videoPreview';
 
-export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemovePhoto, onAddMoreFiles, onConfirm, onCancel, onDismiss, uploading, uploadProgress, event, error }) {
+// Ίδιοι έλεγχοι με το FloatingAddMenu.jsx: η κάμερα της εφαρμογής (με zoom
+// και υψηλή ποιότητα) αντί για τη native επιλογή "Take photo or video" του
+// iPhone, που δίνει αισθητά χαμηλότερη ποιότητα, ιδίως στο βίντεο.
+const canInAppPhoto =
+  typeof navigator !== 'undefined' && !!navigator.mediaDevices && !!navigator.mediaDevices.getUserMedia;
+const canInAppVideo = canInAppPhoto && typeof window !== 'undefined' && !!window.MediaRecorder;
+
+export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemovePhoto, onAddMoreFiles, onOpenPhotoCapture, onOpenVideoRecorder, onConfirm, onCancel, onDismiss, uploading, uploadProgress, event, error }) {
   const [selectedIndex, setSelectedIndex] = useState(null);
 
   // pendingFiles είναι στην ΙΔΙΑ σειρά με τα previewUrls (βλ. useEventPhotos.js)
@@ -26,6 +33,37 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
   const [selectedCategory, setSelectedCategory] = useState(availableCategories[0] || '');
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const addMoreInputRef = useRef(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const showPhotoOption = canInAppPhoto && !!onOpenPhotoCapture;
+  const showVideoOption = canInAppVideo && !!onOpenVideoRecorder;
+  // Αν δεν υπάρχει καμία in-app κάμερα, το κουμπί ανοίγει απευθείας τη
+  // συλλογή όπως πριν.
+  const hasAddMenu = showPhotoOption || showVideoOption;
+  const handleAddClick = () => {
+    if (hasAddMenu) {
+      setAddMenuOpen((open) => !open);
+    } else {
+      addMoreInputRef.current?.click();
+    }
+  };
+  // Κλείσιμο του μενού με άγγιγμα οπουδήποτε έξω από αυτό. Listener στο
+  // document (όχι fixed backdrop), γιατί το sheet έχει transform για το
+  // swipe και ένα fixed στοιχείο μέσα του δεν καλύπτει όλη την οθόνη.
+  const addMenuWrapRef = useRef(null);
+  useEffect(() => {
+    if (!addMenuOpen) return undefined;
+    const onDown = (e) => {
+      if (addMenuWrapRef.current && !addMenuWrapRef.current.contains(e.target)) {
+        setAddMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [addMenuOpen]);
+  const pickAddOption = (action) => {
+    setAddMenuOpen(false);
+    action();
+  };
   const touchStartX = useRef(null);
 
   // Drag-to-dismiss στη λαβή πάνω πάνω (σαν iOS sheet): σέρνεις κάτω, το
@@ -140,14 +178,39 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
                 {hasVideo ? ' · Βίντεο έως 5 λεπτά' : ''}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => addMoreInputRef.current?.click()}
-              disabled={uploading}
-              style={styles.addMoreBtn}
-            >
-              + Προσθήκη
-            </button>
+            <div ref={addMenuWrapRef} style={styles.addMoreWrap}>
+              <button
+                type="button"
+                onClick={handleAddClick}
+                disabled={uploading}
+                aria-expanded={hasAddMenu ? addMenuOpen : undefined}
+                style={styles.addMoreBtn}
+              >
+                + Προσθήκη
+              </button>
+              {addMenuOpen && !uploading && (
+                <>
+                  <div style={styles.addMenu} role="menu">
+                    {showPhotoOption && (
+                      <button type="button" role="menuitem" style={styles.addMenuItem} onClick={() => pickAddOption(onOpenPhotoCapture)}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
+                        Φωτογραφία
+                      </button>
+                    )}
+                    {showVideoOption && (
+                      <button type="button" role="menuitem" style={styles.addMenuItem} onClick={() => pickAddOption(onOpenVideoRecorder)}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" /></svg>
+                        Βίντεο
+                      </button>
+                    )}
+                    <button type="button" role="menuitem" style={{ ...styles.addMenuItem, borderBottom: 'none' }} onClick={() => pickAddOption(() => addMoreInputRef.current?.click())}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                      Από τη συλλογή
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
 
           {/* MINIMAL CUSTOM DROPDOWN */}
@@ -507,8 +570,38 @@ const styles = {
     fontSize: '12px',
     fontWeight: '600',
     cursor: 'pointer',
-    whiteSpace: 'nowrap',
+    whiteSpace: 'nowrap'
+  },
+  addMoreWrap: {
+    position: 'relative',
     flexShrink: 0
+  },
+  addMenu: {
+    position: 'absolute',
+    top: 'calc(100% + 8px)',
+    right: 0,
+    zIndex: 2,
+    minWidth: '190px',
+    background: 'rgba(38, 42, 33, 0.98)',
+    border: '1px solid rgba(217, 181, 74, 0.35)',
+    borderRadius: '12px',
+    boxShadow: '0 12px 28px rgba(0,0,0,0.45)',
+    overflow: 'hidden'
+  },
+  addMenuItem: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '13px 16px',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    color: '#fff',
+    fontSize: '15px',
+    fontWeight: '500',
+    textAlign: 'left',
+    cursor: 'pointer'
   },
   scrollContainer: {
     width: '100%',
