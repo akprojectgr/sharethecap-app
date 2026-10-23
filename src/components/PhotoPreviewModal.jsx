@@ -133,7 +133,7 @@ export default function PhotoPreviewModal({ previewUrls, pendingFiles, onRemoveP
           </div>
 
           <div style={styles.headerRow}>
-            <div>
+            <div style={styles.headerText}>
               <p style={styles.title}>Νέες φωτογραφίες ({previewUrls.length})</p>
               <p style={styles.subtitle}>
                 Πάτησε μια φωτογραφία για προβολή
@@ -476,7 +476,14 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: '12px',
     marginBottom: '14px'
+  },
+  // Το κείμενο παίρνει όσο χώρο μένει και αναδιπλώνεται, ώστε να μην
+  // περνάει ποτέ κάτω από το κουμπί "+ Προσθήκη".
+  headerText: {
+    flex: '1 1 auto',
+    minWidth: 0
   },
   title: {
     color: 'white',
@@ -500,7 +507,8 @@ const styles = {
     fontSize: '12px',
     fontWeight: '600',
     cursor: 'pointer',
-    whiteSpace: 'nowrap'
+    whiteSpace: 'nowrap',
+    flexShrink: 0
   },
   scrollContainer: {
     width: '100%',
