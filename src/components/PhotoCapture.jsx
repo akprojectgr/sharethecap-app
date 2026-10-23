@@ -1,4 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { useCameraZoom, digitalCropRect } from '../lib/useCameraZoom';
+import ZoomControls, { ZoomViewport } from './ZoomControls';
 
 // Ίδιο σκεπτικό/λύση με το VideoRecorder.jsx (βλ. εκεί για την πλήρη
 // εξήγηση) - εδώ το ίδιο πρόβλημα αλλά για ΦΩΤΟΓΡΑΦΙΑ:
@@ -52,6 +54,15 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
   // καθόλου - το κουμπί εμφανίζεται μόνο όταν όντως δουλεύει).
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
+  const torchOnRef = useRef(false);
+
+  // Zoom (pinch + κουμπιά 1x/2x/3x) - βλ. lib/useCameraZoom.js. Το φλας
+  // ξαναστέλνεται μαζί με κάθε αλλαγή zoom, γιατί το applyConstraints
+  // αντικαθιστά όλα τα advanced constraints μαζί.
+  const cam = useCameraZoom();
+  useEffect(() => {
+    cam.setExtraConstraints(() => (torchOnRef.current ? { torch: true } : {}));
+  }, [cam.setExtraConstraints]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -75,6 +86,7 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
     // ξέρουμε ακόμα αν το νέο track το υποστηρίζει μέχρι να το ελέγξουμε
     // παρακάτω.
     setTorchOn(false);
+    torchOnRef.current = false;
     setTorchSupported(false);
     stopStream();
     try {
@@ -110,6 +122,7 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
       const videoTrack = stream.getVideoTracks()[0];
       const capabilities = videoTrack?.getCapabilities?.();
       setTorchSupported(!!capabilities && 'torch' in capabilities);
+      cam.configure(videoTrack);
       if (videoRef.current) {
         const videoEl = videoRef.current;
         videoEl.srcObject = stream;
@@ -146,7 +159,7 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
     } finally {
       setSwitchingCamera(false);
     }
-  }, [stopStream]);
+  }, [stopStream, cam.configure]);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,7 +181,8 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
     if (!track) return;
     const next = !torchOn;
     try {
-      await track.applyConstraints({ advanced: [{ torch: next }] });
+      await track.applyConstraints({ advanced: [{ torch: next, ...cam.hardwareZoomConstraint() }] });
+      torchOnRef.current = next;
       setTorchOn(next);
     } catch (err) {
       // Σπάνιο (π.χ. η συσκευή "λέει" ότι υποστηρίζει torch αλλά αρνείται
@@ -191,8 +205,14 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
     if (!video || !video.videoWidth) return;
     const canvas = canvasRef.current || document.createElement('canvas');
     canvasRef.current = canvas;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Ψηφιακό zoom (iOS κ.λπ.): κρατάμε μόνο το κεντρικό κομμάτι που
+    // έβλεπε ο χρήστης στην προεπισκόπηση. Με hardware zoom το frame είναι
+    // ήδη zoomαρισμένο από την κάμερα, οπότε παίρνουμε ολόκληρο.
+    const crop = cam.mode === 'digital'
+      ? digitalCropRect(video.videoWidth, video.videoHeight, cam.zoomRef.current)
+      : { sx: 0, sy: 0, sw: video.videoWidth, sh: video.videoHeight };
+    canvas.width = crop.sw;
+    canvas.height = crop.sh;
     const ctx = canvas.getContext('2d');
     // Μπροστινή (selfie) κάμερα: το ζωντανό preview είναι mirrored (βλ.
     // transform στο <video> παρακάτω) - η αποθηκευμένη φωτογραφία ακολουθεί
@@ -203,7 +223,7 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
     }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, canvas.width, canvas.height);
     // Ποιότητα 0.85 (αντί για 0.92) - βλ. σχόλιο στο startStream() παραπάνω
     // για το γιατί: κρατάει το τελικό αρχείο "ελαφρύ" παρά την ανεβασμένη
     // ανάλυση (2560x1440), ισορροπώντας ταχύτητα ανεβάσματος με ποιότητα
@@ -270,7 +290,7 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
   };
 
   return (
-    <div style={styles.overlay}>
+    <div ref={cam.attachSurface} style={styles.overlay}>
       {error ? (
         <div style={styles.errorBox}>
           <p style={styles.errorText}>{error}</p>
@@ -292,18 +312,33 @@ export default function PhotoCapture({ onCancel, onCaptured }) {
         </>
       ) : (
         <>
-          <video
-            ref={attachLiveVideo}
-            autoPlay
-            muted
-            playsInline
-            style={{
-              ...styles.video,
-              // Μόνο η μπροστινή κάμερα δείχνει mirrored preview (standard
-              // convention - η πίσω κάμερα δείχνει ακριβώς όπως είναι).
-              transform: facingMode === 'user' ? 'scaleX(-1)' : 'none'
-            }}
-          />
+          <ZoomViewport videoRef={videoRef}>
+            <video
+              ref={attachLiveVideo}
+              autoPlay
+              muted
+              playsInline
+              style={{
+                ...styles.video,
+                // Μόνο η μπροστινή κάμερα δείχνει mirrored preview (standard
+                // convention - η πίσω κάμερα δείχνει ακριβώς όπως είναι).
+                // + ψηφιακό zoom με CSS scale (με hardware zoom η εικόνα
+                // έρχεται ήδη zoomαρισμένη από την κάμερα).
+                transform: (() => {
+                  const z = cam.mode === 'digital' ? cam.zoom : 1;
+                  return `scale(${facingMode === 'user' ? -z : z}, ${z})`;
+                })()
+              }}
+            />
+          </ZoomViewport>
+          {ready && (
+            <ZoomControls
+              zoom={cam.zoom}
+              presets={cam.presets}
+              showBadge={cam.showBadge}
+              onSelect={(z) => cam.setZoom(z, { silent: true })}
+            />
+          )}
           {!ready && <div style={styles.loadingBadge}>Άνοιγμα κάμερας…</div>}
           {ready && torchSupported && (
             <button
@@ -374,7 +409,9 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    overflow: 'hidden',
+    touchAction: 'none'
   },
   video: {
     width: '100%',

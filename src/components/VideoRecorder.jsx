@@ -1,4 +1,14 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { useCameraZoom, digitalCropRect } from '../lib/useCameraZoom';
+import ZoomControls, { ZoomViewport } from './ZoomControls';
+
+// Ψηφιακό zoom σε βίντεο (iOS, όπου ο browser δεν δίνει zoom κάμερας)
+// σημαίνει εγγραφή μέσω canvas.captureStream() - αν δεν υποστηρίζεται,
+// δεν δείχνουμε καθόλου zoom αντί για zoom που δεν θα φαινόταν στο βίντεο.
+const CANVAS_CAPTURE_SUPPORTED =
+  typeof window !== 'undefined' &&
+  typeof HTMLCanvasElement !== 'undefined' &&
+  typeof HTMLCanvasElement.prototype.captureStream === 'function';
 
 // Γιατί υπάρχει αυτό το component:
 // Το παλιό κουμπί "βίντεο-κάμερα" άνοιγε τη native Camera app της συσκευής
@@ -56,6 +66,62 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
   const [previewBlob, setPreviewBlob] = useState(null);
   const previewVideoRef = useRef(null);
 
+  // Zoom - βλ. lib/useCameraZoom.js. Με ψηφιακό zoom η εγγραφή περνάει από
+  // canvas (zoomCanvasRef) που ζωγραφίζει το κεντρικό crop σε κάθε frame.
+  const cam = useCameraZoom({ allowDigital: CANVAS_CAPTURE_SUPPORTED });
+  const [zoomLocked, setZoomLocked] = useState(false);
+  const zoomPipelineRef = useRef(null); // { rafId, canvasTrack }
+
+  const stopZoomPipeline = useCallback(() => {
+    const pipe = zoomPipelineRef.current;
+    if (!pipe) return;
+    if (pipe.rafId) cancelAnimationFrame(pipe.rafId);
+    pipe.stopped = true;
+    try { pipe.canvasTrack?.stop(); } catch (_e) { /* best effort */ }
+    zoomPipelineRef.current = null;
+  }, []);
+
+  // Επιστρέφει stream για τον MediaRecorder: εικόνα από canvas με το
+  // τρέχον crop (το zoom αλλάζει ζωντανά και κατά την εγγραφή) + τον
+  // αρχικό ήχο του μικροφώνου. null αν κάτι αποτύχει -> raw stream.
+  const startZoomPipeline = useCallback(() => {
+    const v = videoRef.current;
+    const src = streamRef.current;
+    if (!v || !src || !v.videoWidth || !v.videoHeight) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = v.videoWidth;
+      canvas.height = v.videoHeight;
+      const ctx = canvas.getContext('2d');
+      const pipe = { rafId: 0, canvasTrack: null, stopped: false };
+      const draw = () => {
+        if (pipe.stopped) return;
+        const vw = v.videoWidth || canvas.width;
+        const vh = v.videoHeight || canvas.height;
+        const c = digitalCropRect(vw, vh, cam.zoomRef.current);
+        try {
+          ctx.drawImage(v, c.sx, c.sy, c.sw, c.sh, 0, 0, canvas.width, canvas.height);
+        } catch (_e) { /* frame not ready */ }
+        pipe.rafId = requestAnimationFrame(draw);
+      };
+      draw();
+      const canvasStream = canvas.captureStream(30);
+      const canvasTrack = canvasStream.getVideoTracks()[0];
+      if (!canvasTrack) {
+        pipe.stopped = true;
+        cancelAnimationFrame(pipe.rafId);
+        return null;
+      }
+      pipe.canvasTrack = canvasTrack;
+      zoomPipelineRef.current = pipe;
+      return new MediaStream([canvasTrack, ...src.getAudioTracks()]);
+    } catch (err) {
+      console.error('zoom canvas pipeline failed, recording without zoom:', err);
+      stopZoomPipeline();
+      return null;
+    }
+  }, [cam.zoomRef, stopZoomPipeline]);
+
   const stopStream = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -96,6 +162,7 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
           return;
         }
         streamRef.current = stream;
+        cam.configure(stream.getVideoTracks()[0]);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
@@ -110,6 +177,7 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
 
     return () => {
       cancelled = true;
+      stopZoomPipeline();
       stopStream();
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -139,6 +207,21 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
     mimeTypeRef.current = mimeType;
     chunksRef.current = [];
 
+    // Πηγή εγγραφής: με ψηφιακό zoom > 1x γράφουμε από canvas (crop), ώστε
+    // το βίντεο να βγει όπως το βλέπει ο χρήστης. Σε 1x (ή hardware zoom)
+    // γράφουμε το stream της κάμερας ακριβώς όπως πριν. Αν ξεκίνησε σε 1x με
+    // ψηφιακό zoom, κλειδώνουμε το zoom μέχρι το τέλος της εγγραφής.
+    let recordStream = streamRef.current;
+    if (cam.mode === 'digital') {
+      const piped = cam.zoomRef.current > 1.01 ? startZoomPipeline() : null;
+      if (piped) {
+        recordStream = piped;
+      } else {
+        cam.setLocked(true);
+        setZoomLocked(true);
+      }
+    }
+
     // Ρητό υψηλό bitrate - χωρίς αυτό, ο browser encoder βάζει μόνος του
     // ένα συντηρητικό (χαμηλότερο) bitrate που κάνει το βίντεο αισθητά πιο
     // "θολό"/συμπιεσμένο από ό,τι θα έβγαζε η native Camera app. 8 Mbps
@@ -152,15 +235,18 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
 
     let recorder;
     try {
-      recorder = new MediaRecorder(streamRef.current, recorderOptions);
+      recorder = new MediaRecorder(recordStream, recorderOptions);
     } catch (err) {
       console.error('MediaRecorder init with options failed, retrying with defaults:', err);
       try {
         recorder = mimeType
-          ? new MediaRecorder(streamRef.current, { mimeType })
-          : new MediaRecorder(streamRef.current);
+          ? new MediaRecorder(recordStream, { mimeType })
+          : new MediaRecorder(recordStream);
       } catch (err2) {
         console.error('MediaRecorder init failed:', err2);
+        stopZoomPipeline();
+        cam.setLocked(false);
+        setZoomLocked(false);
         setError('Η εγγραφή βίντεο δεν μπόρεσε να ξεκινήσει σε αυτή τη συσκευή.');
         return;
       }
@@ -184,6 +270,9 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
       // ακόμα σε αυτό το σημείο, άρα το videoRef.current δείχνει ακόμα
       // ζωντανή εικόνα.
       capturePosterFromLiveVideo();
+      stopZoomPipeline();
+      cam.setLocked(false);
+      setZoomLocked(false);
     };
 
     recorder.start();
@@ -199,7 +288,7 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
         return next;
       });
     }, 1000);
-  }, [stopRecording]);
+  }, [stopRecording, cam, startZoomPipeline, stopZoomPipeline]);
 
   // ΔΙΟΡΘΩΣΗ ("μαύρη οθόνη μετά το 'Ξανά'") - ίδιο ακριβώς bug/λύση με το
   // PhotoCapture.jsx (βλ. εκεί για πλήρη εξήγηση): το live <video>
@@ -240,12 +329,15 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
       canvas.width = v.videoWidth;
       canvas.height = v.videoHeight;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+      const c = cam.mode === 'digital'
+        ? digitalCropRect(v.videoWidth, v.videoHeight, cam.zoomRef.current)
+        : { sx: 0, sy: 0, sw: v.videoWidth, sh: v.videoHeight };
+      ctx.drawImage(v, c.sx, c.sy, c.sw, c.sh, 0, 0, canvas.width, canvas.height);
       setPreviewPosterUrl(canvas.toDataURL('image/jpeg', 0.85));
     } catch (err) {
       console.error('Αποτυχία capture frame από ζωντανή κάμερα για preview poster:', err);
     }
-  }, []);
+  }, [cam.mode, cam.zoomRef]);
 
   const retake = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -274,12 +366,13 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
   };
 
   const handleCancel = () => {
+    stopZoomPipeline();
     stopStream();
     onCancel();
   };
 
   return (
-    <div style={styles.overlay}>
+    <div ref={cam.attachSurface} style={styles.overlay}>
       {error ? (
         <div style={styles.errorBox}>
           <p style={styles.errorText}>{error}</p>
@@ -309,7 +402,26 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
         </>
       ) : (
         <>
-          <video ref={attachLiveVideo} autoPlay muted playsInline style={styles.video} />
+          <ZoomViewport videoRef={videoRef}>
+            <video
+              ref={attachLiveVideo}
+              autoPlay
+              muted
+              playsInline
+              style={{
+                ...styles.video,
+                transform: cam.mode === 'digital' ? `scale(${cam.zoom})` : 'none'
+              }}
+            />
+          </ZoomViewport>
+          {ready && !zoomLocked && (
+            <ZoomControls
+              zoom={cam.zoom}
+              presets={cam.presets}
+              showBadge={cam.showBadge}
+              onSelect={(z) => cam.setZoom(z, { silent: true })}
+            />
+          )}
           {!ready && (
             <div style={styles.loadingBadge}>Άνοιγμα κάμερας…</div>
           )}
@@ -355,7 +467,9 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    overflow: 'hidden',
+    touchAction: 'none'
   },
   video: {
     width: '100%',
