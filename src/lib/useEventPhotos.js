@@ -26,15 +26,6 @@ import { compressImage } from './imageCompress';
 // γενικό safety cap.
 const MAX_VIDEO_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB (ταιριάζει με το bucket limit στο Supabase - ανέβηκε από 500MB->1GB)
 
-// ΔΙΟΡΘΩΣΗ ("βίντεο από τη συλλογή χωρίς κανένα όριο διάρκειας"): το
-// in-app VideoRecorder.jsx έχει δικό του, πιο αυστηρό όριο ΕΓΓΡΑΦΗΣ
-// (MAX_RECORD_SECONDS = 90 εκεί - λογικό για μια γρήγορη "ζωντανή" λήψη
-// μέσα στην εφαρμογή), αλλά ένα βίντεο που ο guest επιλέγει ΕΤΟΙΜΟ από τη
-// συλλογή του κινητού του περνούσε ΜΟΝΟ από τον έλεγχο ΜΕΓΕΘΟΥΣ
-// (MAX_VIDEO_SIZE_BYTES πιο πάνω) - τεχνικά μπορεί να είναι κάτω από το
-// όριο του 1GB αλλά να παίρνει πολλή ώρα να ανέβει σε αδύναμο δίκτυο venue.
-//
-// ΔΙΟΡΘΩΣΗ 2 ("90 δευτ. είναι πολύ αυστηρό - ένα βίντεο χορού/ομιλίας
 // ΔΙΟΡΘΩΣΗ v2 (πραγματικό περιστατικό σε event - guest περίμενε πολύ ώρα να
 // ανέβει βίντεο, έκλεισε/ξανάνοιξε την εφαρμογή από αγανάκτηση, το βίντεο
 // χάθηκε): αποφασίστηκε "story"-στυλ περιορισμός 30″ σε ΟΛΗ την εφαρμογή
@@ -42,10 +33,21 @@ const MAX_VIDEO_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB (ταιριάζει με
 // γρήγορο αρχείο. Η επιλογή "βίντεο από τη συλλογή" αφαιρέθηκε εντελώς από
 // το μενού (βλ. FloatingAddMenu.jsx - accept="image/*" μόνο πλέον) - ΚΑΘΕ
 // βίντεο περνάει υποχρεωτικά από το in-app recorder, που ήδη εγγυάται αυτό
-// το όριο στην πηγή. Αυτός ο έλεγχος μένει ΜΟΝΟ ως ασφαλιστική δικλείδα
-// (defense-in-depth) για ό,τι σπάνιο/edge-case μονοπάτι θα μπορούσε ακόμα να
-// φέρει βίντεο στο σύστημα - στην πράξη δεν αναμένεται πια να ενεργοποιείται.
+// το όριο στην πηγή.
 const MAX_VIDEO_DURATION_SECONDS = 30;
+
+// ΔΙΟΡΘΩΣΗ v3 (πραγματικό bug σε δοκιμή μετά το v2 παραπάνω - "το ίδιο μας
+// το recorder απορρίπτει το δικό του βίντεο"): ο in-app recorder σταματάει
+// την εγγραφή ΜΕΣΩ ενός setInterval(..., 1000) που μετράει "ανά 1 δευτ." -
+// JS timers δεν είναι ποτέ 100% ακριβή (καθυστέρηση ανάλογα με το πόσο
+// απασχολημένο είναι το main thread από κάμερα/encoder), οπότε το ΠΡΑΓΜΑΤΙΚΟ
+// μήκος του παραγόμενου αρχείου μπορεί να βγει ελάχιστα ΠΑΝΩ από τα 30.000″
+// (π.χ. 30.1-30.4″) - αυτός ο έλεγχος το απέρριπτε ΑΔΙΚΑ ("30s > όριο 30s"),
+// παρόλο που προήλθε ΑΠΟ ΤΟ ΙΔΙΟ ΜΑΣ το recorder με το ΙΔΙΟ όριο. Μικρό
+// περιθώριο ανοχής ώστε να μην τιμωρούμε φυσιολογική ατέλεια του timer -
+// ένα πραγματικά πολύ μεγαλύτερο βίντεο (π.χ. 40″+) εξακολουθεί να
+// απορρίπτεται κανονικά.
+const VIDEO_DURATION_TOLERANCE_SECONDS = 2;
 
 // Διαβάζει τη διάρκεια ενός video File ΠΡΙΝ ξεκινήσει οποιοδήποτε upload -
 // δημιουργεί ένα αόρατο <video> element (ποτέ δεν μπαίνει στο DOM/δεν
@@ -839,15 +841,17 @@ export function useEventPhotos(currentEvent, guestData, user) {
           continue;
         }
 
-        // ΔΙΟΡΘΩΣΗ (βλ. σχόλιο στο MAX_VIDEO_DURATION_SECONDS πιο πάνω στο
-        // αρχείο): έλεγχος ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - εφαρμόζεται ΜΟΝΟ σε
-        // βίντεο επιλεγμένα από τη συλλογή (το in-app recorder έχει ήδη δικό
-        // του όριο εγγραφής, βλ. VideoRecorder.jsx). Τρέχει ΠΡΙΝ από το HEIC
-        // conversion/preview παρακάτω ώστε να μην "σπαταλάμε" δουλειά σε ένα
-        // αρχείο που θα απορριφθεί ούτως ή άλλως.
+        // ΔΙΟΡΘΩΣΗ (βλ. σχόλια στο MAX_VIDEO_DURATION_SECONDS/
+        // VIDEO_DURATION_TOLERANCE_SECONDS πιο πάνω στο αρχείο): έλεγχος
+        // ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - ασφαλιστική δικλείδα, αφού πλέον ΚΑΘΕ
+        // βίντεο περνάει υποχρεωτικά από το in-app recorder. Με περιθώριο
+        // ανοχής ώστε να μην απορρίπτει βίντεο που βγήκαν ακριβώς από το
+        // δικό μας recorder λόγω φυσιολογικής ατέλειας του JS timer. Τρέχει
+        // ΠΡΙΝ από το HEIC conversion/preview παρακάτω ώστε να μην
+        // "σπαταλάμε" δουλειά σε ένα αρχείο που θα απορριφθεί ούτως ή άλλως.
         if (isVideo) {
           const durationSeconds = await getVideoDurationSeconds(rawFile);
-          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS + VIDEO_DURATION_TOLERANCE_SECONDS) {
             setError(
               `Το βίντεο "${rawFile.name}" είναι πολύ μεγάλο σε διάρκεια (${formatDurationForHuman(durationSeconds)}, μέγιστο ${formatDurationForHuman(MAX_VIDEO_DURATION_SECONDS)}). Κόψε το σε μικρότερο κομμάτι και ξαναδοκίμασε.`
             );
@@ -956,15 +960,17 @@ export function useEventPhotos(currentEvent, guestData, user) {
           continue;
         }
 
-        // ΔΙΟΡΘΩΣΗ (βλ. σχόλιο στο MAX_VIDEO_DURATION_SECONDS πιο πάνω στο
-        // αρχείο): έλεγχος ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - εφαρμόζεται ΜΟΝΟ σε
-        // βίντεο επιλεγμένα από τη συλλογή (το in-app recorder έχει ήδη δικό
-        // του όριο εγγραφής, βλ. VideoRecorder.jsx). Τρέχει ΠΡΙΝ από το HEIC
-        // conversion/preview παρακάτω ώστε να μην "σπαταλάμε" δουλειά σε ένα
-        // αρχείο που θα απορριφθεί ούτως ή άλλως.
+        // ΔΙΟΡΘΩΣΗ (βλ. σχόλια στο MAX_VIDEO_DURATION_SECONDS/
+        // VIDEO_DURATION_TOLERANCE_SECONDS πιο πάνω στο αρχείο): έλεγχος
+        // ΔΙΑΡΚΕΙΑΣ εκτός από μέγεθος - ασφαλιστική δικλείδα, αφού πλέον ΚΑΘΕ
+        // βίντεο περνάει υποχρεωτικά από το in-app recorder. Με περιθώριο
+        // ανοχής ώστε να μην απορρίπτει βίντεο που βγήκαν ακριβώς από το
+        // δικό μας recorder λόγω φυσιολογικής ατέλειας του JS timer. Τρέχει
+        // ΠΡΙΝ από το HEIC conversion/preview παρακάτω ώστε να μην
+        // "σπαταλάμε" δουλειά σε ένα αρχείο που θα απορριφθεί ούτως ή άλλως.
         if (isVideo) {
           const durationSeconds = await getVideoDurationSeconds(rawFile);
-          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+          if (durationSeconds !== null && durationSeconds > MAX_VIDEO_DURATION_SECONDS + VIDEO_DURATION_TOLERANCE_SECONDS) {
             setError(
               `Το βίντεο "${rawFile.name}" είναι πολύ μεγάλο σε διάρκεια (${formatDurationForHuman(durationSeconds)}, μέγιστο ${formatDurationForHuman(MAX_VIDEO_DURATION_SECONDS)}). Κόψε το σε μικρότερο κομμάτι και ξαναδοκίμασε.`
             );
