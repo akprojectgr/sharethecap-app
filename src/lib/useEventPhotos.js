@@ -8,6 +8,7 @@ import { saveMyPhotoToken } from './Deletetokens';
 import { createPreviewBlob } from './Imagepreview';
 import { createVideoThumbnail, isVideoFile } from './videoPreview';
 import { acquireUploadBusy, releaseUploadBusy } from './uploadBusy';
+import { compressImage } from './imageCompress';
 
 // Ανώτατο μέγεθος για βίντεο που ανεβάζει ένας guest - χωρίς αυτό, ένα
 // βίντεο 4K λίγων λεπτών μπορεί εύκολα να είναι 300-500MB+ και να γεμίσει
@@ -874,6 +875,19 @@ export function useEventPhotos(currentEvent, guestData, user) {
           file = new File([convertedBlob], newName, { type: 'image/jpeg' });
         }
 
+        // ΝΕΟ (συμπίεση φωτογραφίας ΠΡΙΝ το upload - βλ. imageCompress.js):
+        // οι περισσότερες φωτογραφίες κινητού είναι 8-15MB· σε αργό δίκτυο
+        // event αυτό ήταν η βασική αιτία των timeouts που είχαμε δει σε
+        // πραγματικά events. Συμπιέζουμε client-side σε ~1080p-class
+        // ανάλυση πριν φύγει το αρχείο - ταιριάζει με αυτό που ήδη
+        // υποσχόμαστε στο marketing ("Full HD download"), άρα καμία
+        // απώλεια σε σχέση με αυτό που έχει ήδη πουληθεί. Η compressImage()
+        // ΠΟΤΕ δεν πετάει exception - αν κάτι πάει στραβά επιστρέφει το
+        // αρχικό αρχείο αναλλοίωτο, άρα το upload δεν μπλοκάρεται ποτέ.
+        if (!isVideo) {
+          file = await compressImage(file);
+        }
+
         processedFiles.push(file);
         urls.push(URL.createObjectURL(file));
       } catch (err) {
@@ -976,6 +990,19 @@ export function useEventPhotos(currentEvent, guestData, user) {
           });
           const newName = rawFile.name.replace(/\.hei[cf]$/i, '.jpg');
           file = new File([convertedBlob], newName, { type: 'image/jpeg' });
+        }
+
+        // ΝΕΟ (συμπίεση φωτογραφίας ΠΡΙΝ το upload - βλ. imageCompress.js):
+        // οι περισσότερες φωτογραφίες κινητού είναι 8-15MB· σε αργό δίκτυο
+        // event αυτό ήταν η βασική αιτία των timeouts που είχαμε δει σε
+        // πραγματικά events. Συμπιέζουμε client-side σε ~1080p-class
+        // ανάλυση πριν φύγει το αρχείο - ταιριάζει με αυτό που ήδη
+        // υποσχόμαστε στο marketing ("Full HD download"), άρα καμία
+        // απώλεια σε σχέση με αυτό που έχει ήδη πουληθεί. Η compressImage()
+        // ΠΟΤΕ δεν πετάει exception - αν κάτι πάει στραβά επιστρέφει το
+        // αρχικό αρχείο αναλλοίωτο, άρα το upload δεν μπλοκάρεται ποτέ.
+        if (!isVideo) {
+          file = await compressImage(file);
         }
 
         processedFiles.push(file);
