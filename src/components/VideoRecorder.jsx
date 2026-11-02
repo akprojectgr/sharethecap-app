@@ -1,14 +1,4 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { useCameraZoom, digitalCropRect } from '../lib/useCameraZoom';
-import ZoomControls, { ZoomViewport } from './ZoomControls';
-
-// Ψηφιακό zoom σε βίντεο (iOS, όπου ο browser δεν δίνει zoom κάμερας)
-// σημαίνει εγγραφή μέσω canvas.captureStream() - αν δεν υποστηρίζεται,
-// δεν δείχνουμε καθόλου zoom αντί για zoom που δεν θα φαινόταν στο βίντεο.
-const CANVAS_CAPTURE_SUPPORTED =
-  typeof window !== 'undefined' &&
-  typeof HTMLCanvasElement !== 'undefined' &&
-  typeof HTMLCanvasElement.prototype.captureStream === 'function';
 
 // Γιατί υπάρχει αυτό το component:
 // Το παλιό κουμπί "βίντεο-κάμερα" άνοιγε τη native Camera app της συσκευής
@@ -27,7 +17,15 @@ const CANVAS_CAPTURE_SUPPORTED =
 // το tab σε background/risk of kill - το βίντεο μένει πάντα ζωντανό στη
 // μνήμη μέχρι να το επιβεβαιώσει ο χρήστης.
 
-const MAX_RECORD_SECONDS = 90; // απλό guard ώστε να μη γίνει τεράστιο αρχείο
+// ΔΙΟΡΘΩΣΗ (απόφαση μετά από πραγματικό περιστατικό σε event - βλ. σχόλιο
+// στο videoBitsPerSecond παρακάτω): "story"-στυλ όριο 30″ αντί για 90″ -
+// εγγυάται μικρό/γρήγορο αρχείο ΠΑΝΤΑ, ανεξάρτητα από δίκτυο. Μαζί με το
+// δαχτυλίδι προόδου γύρω από το κουμπί στο κουμπί "Διακοπή" (βλ. JSX
+// παρακάτω - ίδια λογική με Instagram/TikTok Stories) ο guest βλέπει καθαρά
+// πόσος χρόνος απομένει όσο γράφει, όχι μόνο μετά.
+const MAX_RECORD_SECONDS = 30;
+const RECORD_RING_RADIUS = 36;
+const RECORD_RING_CIRCUMFERENCE = 2 * Math.PI * RECORD_RING_RADIUS;
 
 function pickMimeType() {
   if (typeof window === 'undefined' || !window.MediaRecorder) return '';
@@ -65,62 +63,6 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [previewBlob, setPreviewBlob] = useState(null);
   const previewVideoRef = useRef(null);
-
-  // Zoom - βλ. lib/useCameraZoom.js. Με ψηφιακό zoom η εγγραφή περνάει από
-  // canvas (zoomCanvasRef) που ζωγραφίζει το κεντρικό crop σε κάθε frame.
-  const cam = useCameraZoom({ allowDigital: CANVAS_CAPTURE_SUPPORTED });
-  const [zoomLocked, setZoomLocked] = useState(false);
-  const zoomPipelineRef = useRef(null); // { rafId, canvasTrack }
-
-  const stopZoomPipeline = useCallback(() => {
-    const pipe = zoomPipelineRef.current;
-    if (!pipe) return;
-    if (pipe.rafId) cancelAnimationFrame(pipe.rafId);
-    pipe.stopped = true;
-    try { pipe.canvasTrack?.stop(); } catch (_e) { /* best effort */ }
-    zoomPipelineRef.current = null;
-  }, []);
-
-  // Επιστρέφει stream για τον MediaRecorder: εικόνα από canvas με το
-  // τρέχον crop (το zoom αλλάζει ζωντανά και κατά την εγγραφή) + τον
-  // αρχικό ήχο του μικροφώνου. null αν κάτι αποτύχει -> raw stream.
-  const startZoomPipeline = useCallback(() => {
-    const v = videoRef.current;
-    const src = streamRef.current;
-    if (!v || !src || !v.videoWidth || !v.videoHeight) return null;
-    try {
-      const canvas = document.createElement('canvas');
-      canvas.width = v.videoWidth;
-      canvas.height = v.videoHeight;
-      const ctx = canvas.getContext('2d');
-      const pipe = { rafId: 0, canvasTrack: null, stopped: false };
-      const draw = () => {
-        if (pipe.stopped) return;
-        const vw = v.videoWidth || canvas.width;
-        const vh = v.videoHeight || canvas.height;
-        const c = digitalCropRect(vw, vh, cam.zoomRef.current);
-        try {
-          ctx.drawImage(v, c.sx, c.sy, c.sw, c.sh, 0, 0, canvas.width, canvas.height);
-        } catch (_e) { /* frame not ready */ }
-        pipe.rafId = requestAnimationFrame(draw);
-      };
-      draw();
-      const canvasStream = canvas.captureStream(30);
-      const canvasTrack = canvasStream.getVideoTracks()[0];
-      if (!canvasTrack) {
-        pipe.stopped = true;
-        cancelAnimationFrame(pipe.rafId);
-        return null;
-      }
-      pipe.canvasTrack = canvasTrack;
-      zoomPipelineRef.current = pipe;
-      return new MediaStream([canvasTrack, ...src.getAudioTracks()]);
-    } catch (err) {
-      console.error('zoom canvas pipeline failed, recording without zoom:', err);
-      stopZoomPipeline();
-      return null;
-    }
-  }, [cam.zoomRef, stopZoomPipeline]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -162,7 +104,6 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
           return;
         }
         streamRef.current = stream;
-        cam.configure(stream.getVideoTracks()[0]);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
@@ -177,7 +118,6 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
 
     return () => {
       cancelled = true;
-      stopZoomPipeline();
       stopStream();
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -207,46 +147,34 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
     mimeTypeRef.current = mimeType;
     chunksRef.current = [];
 
-    // Πηγή εγγραφής: με ψηφιακό zoom > 1x γράφουμε από canvas (crop), ώστε
-    // το βίντεο να βγει όπως το βλέπει ο χρήστης. Σε 1x (ή hardware zoom)
-    // γράφουμε το stream της κάμερας ακριβώς όπως πριν. Αν ξεκίνησε σε 1x με
-    // ψηφιακό zoom, κλειδώνουμε το zoom μέχρι το τέλος της εγγραφής.
-    let recordStream = streamRef.current;
-    if (cam.mode === 'digital') {
-      const piped = cam.zoomRef.current > 1.01 ? startZoomPipeline() : null;
-      if (piped) {
-        recordStream = piped;
-      } else {
-        cam.setLocked(true);
-        setZoomLocked(true);
-      }
-    }
-
-    // Ρητό υψηλό bitrate - χωρίς αυτό, ο browser encoder βάζει μόνος του
-    // ένα συντηρητικό (χαμηλότερο) bitrate που κάνει το βίντεο αισθητά πιο
-    // "θολό"/συμπιεσμένο από ό,τι θα έβγαζε η native Camera app. 8 Mbps
-    // είναι καλή ποιότητα για 1080p (περίπου το ίδιο επίπεδο με μέτρια-καλή
-    // native εγγραφή), χωρίς να κάνει τα αρχεία υπερβολικά μεγάλα.
+    // ΔΙΟΡΘΩΣΗ (πραγματικό περιστατικό σε event - guest περίμενε πολύ ώρα να
+    // ανέβει βίντεο, έκλεισε/ξανάνοιξε την εφαρμογή από αγανάκτηση και το
+    // βίντεο χάθηκε χωρίς καν να καταγραφεί σφάλμα - το OS-level κλείσιμο
+    // της εφαρμογής σκοτώνει τη διαδικασία πριν προλάβει να γράψει
+    // οτιδήποτε, άρα δεν μπορούμε να το "πιάσουμε" με κώδικα): πριν αυτό
+    // έγραφε σε 8 Mbps - ένα 1λεπτο βίντεο έβγαινε ~60MB, υπερβολικά μεγάλο
+    // για αργό δίκτυο event. 3 Mbps δίνει ακόμα καλή ποιότητα για
+    // προβολή σε κινητό/projector (όχι ίδιο επίπεδο με επαγγελματική
+    // εγγραφή, αλλά αισθητά ελαφρύτερο αρχείο - ~22MB για 1λεπτο αντί για
+    // ~60MB), μειώνοντας τον χρόνο αναμονής άρα και την πιθανότητα να
+    // αγανακτήσει κάποιος guest πριν προλάβει να ολοκληρωθεί το upload.
     const recorderOptions = {
-      videoBitsPerSecond: 8_000_000,
+      videoBitsPerSecond: 3_000_000,
       audioBitsPerSecond: 128_000
     };
     if (mimeType) recorderOptions.mimeType = mimeType;
 
     let recorder;
     try {
-      recorder = new MediaRecorder(recordStream, recorderOptions);
+      recorder = new MediaRecorder(streamRef.current, recorderOptions);
     } catch (err) {
       console.error('MediaRecorder init with options failed, retrying with defaults:', err);
       try {
         recorder = mimeType
-          ? new MediaRecorder(recordStream, { mimeType })
-          : new MediaRecorder(recordStream);
+          ? new MediaRecorder(streamRef.current, { mimeType })
+          : new MediaRecorder(streamRef.current);
       } catch (err2) {
         console.error('MediaRecorder init failed:', err2);
-        stopZoomPipeline();
-        cam.setLocked(false);
-        setZoomLocked(false);
         setError('Η εγγραφή βίντεο δεν μπόρεσε να ξεκινήσει σε αυτή τη συσκευή.');
         return;
       }
@@ -270,9 +198,6 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
       // ακόμα σε αυτό το σημείο, άρα το videoRef.current δείχνει ακόμα
       // ζωντανή εικόνα.
       capturePosterFromLiveVideo();
-      stopZoomPipeline();
-      cam.setLocked(false);
-      setZoomLocked(false);
     };
 
     recorder.start();
@@ -288,7 +213,7 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
         return next;
       });
     }, 1000);
-  }, [stopRecording, cam, startZoomPipeline, stopZoomPipeline]);
+  }, [stopRecording]);
 
   // ΔΙΟΡΘΩΣΗ ("μαύρη οθόνη μετά το 'Ξανά'") - ίδιο ακριβώς bug/λύση με το
   // PhotoCapture.jsx (βλ. εκεί για πλήρη εξήγηση): το live <video>
@@ -329,15 +254,12 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
       canvas.width = v.videoWidth;
       canvas.height = v.videoHeight;
       const ctx = canvas.getContext('2d');
-      const c = cam.mode === 'digital'
-        ? digitalCropRect(v.videoWidth, v.videoHeight, cam.zoomRef.current)
-        : { sx: 0, sy: 0, sw: v.videoWidth, sh: v.videoHeight };
-      ctx.drawImage(v, c.sx, c.sy, c.sw, c.sh, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
       setPreviewPosterUrl(canvas.toDataURL('image/jpeg', 0.85));
     } catch (err) {
       console.error('Αποτυχία capture frame από ζωντανή κάμερα για preview poster:', err);
     }
-  }, [cam.mode, cam.zoomRef]);
+  }, []);
 
   const retake = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -366,13 +288,21 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
   };
 
   const handleCancel = () => {
-    stopZoomPipeline();
+    // ΔΙΟΡΘΩΣΗ (code review - "blob URL leak στο Ακύρωση"): το retake() και
+    // το confirmUse() κάνουν ήδη σωστά revokeObjectURL(previewUrl), αλλά
+    // αυτό το μονοπάτι (ο guest πατάει "Ακύρωση" ΑΦΟΥ έχει ήδη τραβήξει/
+    // ξανατραβήξει ένα preview βίντεο) το παρέλειπε - το blob URL (και το
+    // underlying video data, συχνά δεκάδες MB) έμενε ζωντανό στη μνήμη της
+    // καρτέλας για όλη την υπόλοιπη διάρκεια της σελίδας. Αν ένας guest
+    // τραβήξει-ακυρώσει αρκετές φορές μέσα στη βραδιά, η μνήμη συσσωρεύεται
+    // αθόρυβα (κρίσιμο σε iOS Safari, που κλείνει καρτέλες με πολλή μνήμη).
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     stopStream();
     onCancel();
   };
 
   return (
-    <div ref={cam.attachSurface} style={styles.overlay}>
+    <div style={styles.overlay}>
       {error ? (
         <div style={styles.errorBox}>
           <p style={styles.errorText}>{error}</p>
@@ -402,26 +332,7 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
         </>
       ) : (
         <>
-          <ZoomViewport videoRef={videoRef}>
-            <video
-              ref={attachLiveVideo}
-              autoPlay
-              muted
-              playsInline
-              style={{
-                ...styles.video,
-                transform: cam.mode === 'digital' ? `scale(${cam.zoom})` : 'none'
-              }}
-            />
-          </ZoomViewport>
-          {ready && !zoomLocked && (
-            <ZoomControls
-              zoom={cam.zoom}
-              presets={cam.presets}
-              showBadge={cam.showBadge}
-              onSelect={(z) => cam.setZoom(z, { silent: true })}
-            />
-          )}
+          <video ref={attachLiveVideo} autoPlay muted playsInline style={styles.video} />
           {!ready && (
             <div style={styles.loadingBadge}>Άνοιγμα κάμερας…</div>
           )}
@@ -441,14 +352,36 @@ export default function VideoRecorder({ onCancel, onCaptured }) {
                 aria-label="Έναρξη εγγραφής"
               />
             ) : (
-              <button
-                type="button"
-                onClick={stopRecording}
-                style={styles.stopBtn}
-                aria-label="Διακοπή εγγραφής"
-              >
-                <span style={styles.stopBtnInner} />
-              </button>
+              <div style={styles.recordRingWrap}>
+                {/* ΝΕΟ: δαχτυλίδι προόδου (σαν Instagram/TikTok Stories) -
+                γεμίζει καθώς πλησιάζει το όριο των 30″, ώστε ο guest να
+                βλέπει ΟΠΤΙΚΑ πόσος χρόνος του μένει χωρίς να χρειάζεται να
+                διαβάσει αριθμό. */}
+                <svg width="80" height="80" viewBox="0 0 80 80" style={styles.recordRingSvg} aria-hidden="true">
+                  <circle cx="40" cy="40" r={RECORD_RING_RADIUS} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="4" />
+                  <circle
+                    cx="40"
+                    cy="40"
+                    r={RECORD_RING_RADIUS}
+                    fill="none"
+                    stroke="#E6C594"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    strokeDasharray={RECORD_RING_CIRCUMFERENCE}
+                    strokeDashoffset={RECORD_RING_CIRCUMFERENCE * (1 - Math.min(seconds / MAX_RECORD_SECONDS, 1))}
+                    transform="rotate(-90 40 40)"
+                    style={{ transition: 'stroke-dashoffset 1s linear' }}
+                  />
+                </svg>
+                <button
+                  type="button"
+                  onClick={stopRecording}
+                  style={styles.stopBtn}
+                  aria-label="Διακοπή εγγραφής"
+                >
+                  <span style={styles.stopBtnInner} />
+                </button>
+              </div>
             )}
             <div style={{ width: '64px' }} aria-hidden="true" />
           </div>
@@ -462,16 +395,12 @@ const styles = {
   overlay: {
     position: 'fixed',
     inset: 0,
-    // Πάνω από το PhotoPreviewModal (zIndex 9999-10001), γιατί η κάμερα
-    // ανοίγει και από το "+ Προσθήκη" μέσα στο modal.
-    zIndex: 20000,
+    zIndex: 200,
     background: '#000',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    touchAction: 'none'
+    justifyContent: 'center'
   },
   video: {
     width: '100%',
@@ -498,6 +427,20 @@ const styles = {
     cursor: 'pointer',
     flexShrink: 0
   },
+  recordRingWrap: {
+    position: 'relative',
+    width: '80px',
+    height: '80px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0
+  },
+  recordRingSvg: {
+    position: 'absolute',
+    top: 0,
+    left: 0
+  },
   stopBtn: {
     width: '68px',
     height: '68px',
@@ -509,7 +452,8 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 0
+    padding: 0,
+    position: 'relative'
   },
   stopBtnInner: {
     width: '26px',

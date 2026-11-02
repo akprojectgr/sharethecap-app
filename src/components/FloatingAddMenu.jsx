@@ -110,12 +110,18 @@ export default function FloatingAddMenu({
 
   return (
     <>
-      {/* Συλλογή (gallery/files) - δείχνει ΚΑΙ φωτογραφίες ΚΑΙ βίντεο, ο
-      guest διαλέγει ό,τι θέλει από ό,τι έχει ήδη στη συσκευή του. */}
+      {/* Συλλογή (gallery/files) - ΜΟΝΟ φωτογραφίες πλέον (βλ. σχόλιο στο
+      MAX_RECORD_SECONDS/MAX_VIDEO_DURATION_SECONDS): πραγματικό περιστατικό
+      σε event όπου ένα ήδη-τραβηγμένο βίντεο από τη συλλογή (μεγάλο,
+      ανεξέλεγκτο μέγεθος/bitrate) καθυστέρησε υπερβολικά σε αργό δίκτυο. Το
+      βίντεο περνάει ΤΩΡΑ αποκλειστικά από το in-app recorder (κουμπί
+      "Λήψη βίντεο" παρακάτω), που εγγυάται μικρό/γρήγορο αρχείο (30″ όριο,
+      ελεγχόμενο bitrate) - χωρίς accept="video/*" εδώ, ο native file picker
+      δεν δείχνει καν βίντεο στη λίστα επιλογής. */}
       <input
         ref={inviteFileInputRef}
         type="file"
-        accept="image/*,video/*,.heic,.heif"
+        accept="image/*,.heic,.heif"
         multiple
         style={{ display: 'none' }}
         onChange={onFileUpload}
@@ -167,8 +173,9 @@ export default function FloatingAddMenu({
       (όχι μέσα στο flex row του μενού παρακάτω) ώστε να ΜΗΝ επηρεάζει
       καθόλου το υπάρχον layout - εμφανίζεται ΜΟΝΟ όσο είναι ανοιχτό το
       υπο-μενού (ίδια συνθήκη με το ίδιο το μενού), ακριβώς από πάνω του.
-      Το ίδιο όριο (5 λεπτά) με το MAX_VIDEO_DURATION_SECONDS στο
-      useEventPhotos.js - αν αλλάξει εκεί, άλλαξέ το και εδώ. */}
+      Το ίδιο όριο (30″) με το MAX_RECORD_SECONDS στο VideoRecorder.jsx και
+      το MAX_VIDEO_DURATION_SECONDS στο useEventPhotos.js - αν αλλάξει εκεί,
+      άλλαξέ το και εδώ. */}
       {addMenuOpen && !hasDraft && (
         <div
           style={{
@@ -190,7 +197,7 @@ export default function FloatingAddMenu({
             animation: 'menuPopIn 0.22s cubic-bezier(.22,.9,.3,1.3)'
           }}
         >
-          Βίντεο έως 5 λεπτά
+          Βίντεο έως 30″
         </div>
       )}
 
